@@ -9,6 +9,7 @@
 #include "battle_hold_effects.h"
 #include "battle_interface.h"
 #include "battle_main.h"
+#include "kuro_playback.h" // KURO: puppet mode entry point
 #include "battle_message.h"
 #include "battle_pyramid.h"
 #include "battle_scripts.h"
@@ -2727,6 +2728,8 @@ void BeginBattleIntro(void)
     gBattleCommunication[1] = 0;
     gBattleStruct->eventState.battleIntro = 0;
     gBattleMainFunc = DoBattleIntro;
+    if (gBattleTypeFlags & BATTLE_TYPE_KURO_REMOTE) // KURO: puppet mode replaces the turn engine
+        gBattleMainFunc = KuroPlayback_Main;
 }
 
 static void BattleMainCB1(void)

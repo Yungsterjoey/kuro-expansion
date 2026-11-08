@@ -5,6 +5,7 @@
 #include "battle_anim.h"
 #include "battle_arena.h"
 #include "battle_controllers.h"
+#include "kuro_playback.h" // KURO: puppet mode battle flag
 #include "battle_gfx_sfx_util.h"
 #include "battle_interface.h"
 #include "battle_message.h"
@@ -156,8 +157,11 @@ void SetUpBattleVarsAndBirchZigzagoon(void)
     HandleLinkBattleSetup();
     gBattleControllerExecFlags = 0;
     ClearBattleAnimationVars();
-    BattleAI_SetupItems();
-    BattleAI_SetupFlags();
+    if (!(gBattleTypeFlags & BATTLE_TYPE_KURO_REMOTE)) // KURO: puppet mode must not touch the AI
+    {
+        BattleAI_SetupItems();
+        BattleAI_SetupFlags();
+    }
 
     if (!IS_FRLG && gBattleTypeFlags & BATTLE_TYPE_FIRST_BATTLE)
         CreateWildMon(SPECIES_ZIGZAGOON, 2);

@@ -19,6 +19,7 @@
 #include "intro_credits_graphics.h"
 #include "trig.h"
 #include "intro.h"
+#include "kuro_playback.h" // KURO: M0 boot entry point
 #include "graphics.h"
 #include "sound.h"
 #include "util.h"
@@ -1105,6 +1106,10 @@ static u8 SetUpCopyrightScreen(void)
     case COPYRIGHT_START_INTRO:
         if (UpdatePaletteFade())
             break;
+#if KURO_M0_PLAYBACK // KURO: M0 boots straight into fixture playback
+        SetMainCallback2(CB2_KuroM0Start);
+        return 0;
+#endif
 #if EXPANSION_INTRO == TRUE
         SetMainCallback2(CB2_ExpansionIntro);
         CreateTask(Task_HandleExpansionIntro, 0);
