@@ -55,6 +55,7 @@ enum KuroOpcode
     KURO_OP_CHOOSE_SWITCH = 0x21,
     KURO_OP_UNDO_CHOICE = 0x23,
     KURO_OP_FORFEIT = 0x24,
+    KURO_OP_TIMER = 0x25,
     KURO_OP_ANIM_DONE = 0x30,
     KURO_OP_ERR_DESYNC = 0xE0,
 };
@@ -98,6 +99,7 @@ enum KuroState
 #define KURO_RESULT_FRAMES 150
 #define SWITCH_IN_NICKNAME_OFFSET 14
 #define KURO_REQUEST_FORCE_SWITCH (1 << 0)
+#define KURO_REQUEST_REVIVING (1 << 5)
 #define KURO_REQUEST_TRAPPED (1 << 1)
 #define KURO_REQUEST_CAN_TERA (1 << 2)
 #define KURO_REQUEST_WAIT (1 << 3)
@@ -557,6 +559,13 @@ static void EndResync(void)
             AddAction(KURO_ACT_SWITCH_IN, i, slot);
         }
     }
+
+    // A request we already answered comes back flagged wait, and B can still undo it.
+    if (sKuro.isClient && sKuro.haveRequest && (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_WAIT))
+    {
+        sKuro.phase = KURO_UI_WAITING;
+        gKuroUiScreen = KURO_UI_WAITING;
+    }
 }
 
 static void QueueBattleEnd(const u8 *payload)
@@ -985,9 +994,14 @@ static void OpenMoveMenu(void)
 static void OpenPartyMenu(bool32 forced)
 {
     enum BattlerId battler = PlayerBattler();
+    u8 action = forced ? PARTY_ACTION_SEND_OUT : PARTY_ACTION_CHOOSE_MON;
 
+    // Revival Blessing arrives as a forced switch whose only legal picks are fainted.
+    if (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_REVIVING)
+        action = PARTY_ACTION_CHOOSE_FAINTED_MON;
+    gSelectedMonPartyId = PARTY_SIZE;
     gBattleResources->bufferB[battler][1] = PARTY_SIZE;
-    BtlController_EmitChoosePokemon(battler, B_COMM_TO_CONTROLLER, forced ? PARTY_ACTION_SEND_OUT : PARTY_ACTION_CHOOSE_MON,
+    BtlController_EmitChoosePokemon(battler, B_COMM_TO_CONTROLLER, action,
                                     PARTY_SIZE, ABILITY_NONE, 0, gBattleStruct->battlerPartyOrders[battler]);
     MarkBattlerForControllerExec(battler);
     SetPhase(KURO_UI_PARTY);
@@ -1032,11 +1046,24 @@ static void SendChoice(u8 opcode, const u8 *body, u8 length)
     SetPhase(KURO_UI_WAITING);
 }
 
+static bool32 HasMoveToShow(void)
+{
+    u32 i;
+
+    for (i = 0; i < MAX_MON_MOVES; i++)
+    {
+        if (ReadU16(&sKuro.request[REQUEST_MOVES + i * REQUEST_MOVE_SIZE]) != MOVE_NONE)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 // Handles the player's input once the open menu's controller has gone idle.
 static void RunDecision(void)
 {
     enum BattlerId battler = PlayerBattler();
     const u8 *reply = gBattleResources->bufferB[battler];
+    u8 chosenMon;
     u8 body[4];
 
     if (sKuro.labelTimer != 0 && --sKuro.labelTimer == 0)
@@ -1050,7 +1077,19 @@ static void RunDecision(void)
         switch (reply[1])
         {
         case B_ACTION_USE_MOVE:
-            OpenMoveMenu();
+            if (HasMoveToShow())
+            {
+                OpenMoveMenu();
+            }
+            else
+            {
+                // Forced moves with no expansion match, like Recharge, have nothing to list.
+                body[0] = 0;
+                body[1] = 1;
+                body[2] = 0;
+                body[3] = 0;
+                SendChoice(KURO_OP_CHOOSE_MOVE, body, 4);
+            }
             break;
         case B_ACTION_SWITCH:
             if (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_TRAPPED)
@@ -1094,7 +1133,9 @@ static void RunDecision(void)
         }
         break;
     case KURO_UI_PARTY:
-        if (reply[1] >= PARTY_SIZE)
+        // The fainted-pick menu leaves its answer in gSelectedMonPartyId and always replies "cancelled".
+        chosenMon = (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_REVIVING) ? gSelectedMonPartyId : reply[1];
+        if (chosenMon >= PARTY_SIZE)
         {
             if (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_FORCE_SWITCH)
                 OpenPartyMenu(TRUE);
@@ -1104,7 +1145,7 @@ static void RunDecision(void)
         else
         {
             body[0] = 0;
-            body[1] = reply[1] + 1;
+            body[1] = chosenMon + 1;
             SendChoice(KURO_OP_CHOOSE_SWITCH, body, 2);
         }
         break;
@@ -1175,6 +1216,13 @@ static void RunMenuExtras(void)
         sKuro.teraSelected = !sKuro.teraSelected;
         PlaySE(SE_SELECT);
         sKuro.hudShown = FALSE;
+    }
+    if (sKuro.phase == KURO_UI_ACTION && JOY_NEW(START_BUTTON))
+    {
+        u8 enable = !sKuro.timerOn;
+
+        QueueTxBody(KURO_OP_TIMER, &enable, 1);
+        PlaySE(SE_SELECT);
     }
     UpdateHud();
 }
