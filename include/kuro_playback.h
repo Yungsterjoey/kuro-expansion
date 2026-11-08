@@ -48,6 +48,7 @@ void CB2_KuroBoot(void);
 void KuroFreeBattleData(void);
 void CB2_KuroMenuStart(void);
 void KuroPlayback_StartClientBattle(u8 opcode, const u8 *payload, u16 length);
+void KuroPlayback_StartClientResync(const u8 *battleStart, u16 length);
 void KuroPlayback_Main(void);
 
 #endif // GUARD_KURO_PLAYBACK_H

@@ -13,5 +13,6 @@ void KuroBuilder_Open(void);
 void KuroBuilder_Draw(u32 windowId);
 bool32 KuroBuilder_HandleInput(void);
 bool32 KuroBuilder_Tick(void);
+void KuroBuilder_ShowPopup(const u8 *text);
 
 #endif // GUARD_KURO_BUILDER_H

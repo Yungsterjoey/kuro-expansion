@@ -73,6 +73,7 @@ static EWRAM_DATA u8 sPendingStart[KURO_MAX_PAYLOAD + 1] = {0};
 static EWRAM_DATA u16 sPendingStartLength = 0;
 static EWRAM_DATA bool8 sHavePendingStart = FALSE;
 static EWRAM_DATA bool8 sPreviewAnswered = FALSE;
+static EWRAM_DATA bool8 sResyncAtMenu = FALSE;
 static EWRAM_DATA u8 sOurCount = 0;
 static EWRAM_DATA u8 sFoeCount = 0;
 static EWRAM_DATA u16 sOurSpecies[PARTY_SIZE] = {0};
@@ -381,12 +382,17 @@ static bool32 HandlePreviewFrame(u8 opcode, u16 length)
 {
     u32 i;
 
-    if (opcode == OP_RESYNC_BEGIN && (sHavePendingStart || sScreen == SCREEN_PREVIEW))
+    if (opcode == OP_RESYNC_BEGIN)
+    {
+        // Hold the replay until it shows whether the battle is still at team preview.
+        sResyncAtMenu = !(sHavePendingStart || sScreen == SCREEN_PREVIEW);
         return TRUE;
+    }
     if (opcode == OP_RESYNC_END && (sHavePendingStart || sScreen == SCREEN_PREVIEW))
     {
         if (sFoeCount > 0)
             ShowPreview();
+        sResyncAtMenu = FALSE;
         return TRUE;
     }
     if (opcode == OP_BATTLE_START)
@@ -423,7 +429,15 @@ static void StartPendingBattle(void)
     DestroyIcons();
     sHavePendingStart = FALSE;
     sFoeCount = 0;
-    KuroPlayback_StartClientBattle(OP_BATTLE_START, sPendingStart, sPendingStartLength);
+    if (sResyncAtMenu)
+    {
+        sResyncAtMenu = FALSE;
+        KuroPlayback_StartClientResync(sPendingStart, sPendingStartLength);
+    }
+    else
+    {
+        KuroPlayback_StartClientBattle(OP_BATTLE_START, sPendingStart, sPendingStartLength);
+    }
 }
 
 // A battle with no team preview, or one whose preview has been answered, starts on the next battle frame.
@@ -431,9 +445,12 @@ static bool32 TryStartPendingBattle(void)
 {
     s32 next;
 
-    if (!sHavePendingStart || (sFoeCount > 0 && !sPreviewAnswered))
+    if (!sHavePendingStart)
         return FALSE;
     next = KuroLink_PeekOpcode();
+    // A replay that moves on to battle events has passed team preview already.
+    if (sFoeCount > 0 && !sPreviewAnswered && !(sResyncAtMenu && next >= 0x50 && next != OP_RESYNC_END))
+        return FALSE;
     if (next < KURO_FIRST_BATTLE_OPCODE || next == KURO_FRAME_TEAM_PREVIEW || next == OP_RESYNC_BEGIN || next == OP_BATTLE_START)
         return FALSE;
     StartPendingBattle();
@@ -672,6 +689,7 @@ static void CB2_KuroMenu(void)
     {
         gKuroSession.popupPending = FALSE;
         StringCopy(sShownPopup, gKuroSession.popup);
+        KuroBuilder_ShowPopup(sShownPopup);
         sDirty = TRUE;
     }
     if (gKuroSession.status != sLastStatus || gKuroSession.formatCount != sLastFormatCount

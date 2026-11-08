@@ -724,6 +724,17 @@ static void HandleTeamMenu(void)
 
 static EWRAM_DATA u8 sExportMessage[80] = {0};
 
+// The relay explains a refused import or dropped fields by POPUP. Nothing says the import is over,
+// so the text stays on the waiting screen and B leaves it.
+void KuroBuilder_ShowPopup(const u8 *text)
+{
+    if (sBuilder == BS_WAIT_IMPORT)
+    {
+        sMessage = text;
+        sDirty = TRUE;
+    }
+}
+
 // Watches for replies from the relay. Returns TRUE to redraw.
 bool32 KuroBuilder_Tick(void)
 {

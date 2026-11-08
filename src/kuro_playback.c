@@ -34,6 +34,7 @@
 enum KuroOpcode
 {
     KURO_OP_BATTLE_START = 0x40,
+    KURO_OP_TEAM_PREVIEW = 0x41,
     KURO_OP_REQUEST = 0x42,
     KURO_OP_TURN = 0x43,
     KURO_OP_SWITCH_IN = 0x50,
@@ -156,6 +157,9 @@ struct KuroPlayback
     bool8 resyncing;
     bool8 onFieldBeforeResync[MAX_BATTLERS_COUNT];
     bool8 hasStash;
+    bool8 hasNextStash;
+    u16 nextStashLength;
+    u8 nextStash[KURO_MAX_PAYLOAD + 1];
     u8 stashOpcode;
     u16 stashLength;
     u8 stash[KURO_MAX_PAYLOAD + 1];
@@ -688,6 +692,14 @@ static bool32 ReadWireFrame(u8 *opcode, u16 *length)
         memcpy(sKuro.payload, sKuro.stash, sKuro.stashLength);
         return TRUE;
     }
+    if (sKuro.hasNextStash)
+    {
+        sKuro.hasNextStash = FALSE;
+        *opcode = KURO_OP_BATTLE_START;
+        *length = sKuro.nextStashLength;
+        memcpy(sKuro.payload, sKuro.nextStash, sKuro.nextStashLength);
+        return TRUE;
+    }
 
     switch (KuroLink_ReadFrame(opcode, sKuro.payload, length))
     {
@@ -786,6 +798,7 @@ static bool32 FetchNextEvent(void)
         AddAction(KURO_ACT_ABILITY_POPUP, BattlerFromPosition(payload[2]), ReadU16(&payload[3]));
         break;
     case KURO_OP_MESSAGE: AddText(&payload[2]); break;
+    case KURO_OP_TEAM_PREVIEW: break; // A resync replays it; the preview itself runs before the battle scene.
     case KURO_OP_BATTLE_END: QueueBattleEnd(payload, length); break;
     default:
         if (sKuro.isWire)
@@ -1534,6 +1547,17 @@ void KuroPlayback_StartClientBattle(u8 opcode, const u8 *payload, u16 length)
     sKuro.stashOpcode = opcode;
     sKuro.stashLength = length;
     memcpy(sKuro.stash, payload, length);
+}
+
+// A resync that began at the menu: the menu has already read RESYNC_BEGIN and BATTLE_START.
+void KuroPlayback_StartClientResync(const u8 *battleStart, u16 length)
+{
+    static const u8 sResyncBegin[2] = {0, 0};
+
+    KuroPlayback_StartClientBattle(KURO_OP_RESYNC_BEGIN, sResyncBegin, sizeof(sResyncBegin));
+    sKuro.hasNextStash = TRUE;
+    sKuro.nextStashLength = length;
+    memcpy(sKuro.nextStash, battleStart, length);
 }
 
 void CB2_KuroBoot(void)
