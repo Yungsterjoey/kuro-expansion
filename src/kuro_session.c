@@ -3,10 +3,12 @@
 #include "kuro_build_info.h"
 #include "kuro_link.h"
 #include "kuro_session.h"
+#include "kuro_teams.h"
 #include "string_util.h"
 
-#define KURO_PROTOCOL_MINOR 1
+#define KURO_PROTOCOL_MINOR 2
 #define KURO_FEATURE_TERA (1 << 1)
+#define KURO_FEATURE_TEAM_IMPORT (1 << 5)
 #define CAPABILITY_FIXED_SIZE 18
 
 EWRAM_DATA struct KuroSession gKuroSession = {0};
@@ -27,7 +29,7 @@ void KuroSession_Reset(void)
 static u16 BuildCapabilityBlock(u8 *out)
 {
     u32 crc = KURO_IDMAP_CRC;
-    u32 features = KURO_FEATURE_TERA;
+    u32 features = KURO_FEATURE_TERA | KURO_FEATURE_TEAM_IMPORT;
     u16 i, length = 0;
 
     out[length++] = KURO_PROTOCOL_MAJOR;
@@ -125,6 +127,17 @@ void KuroSession_HandleFrame(u8 opcode, const u8 *payload, u16 length)
     case KURO_OP_POPUP:
         CopyText(gKuroSession.popup, sizeof(gKuroSession.popup), payload, length, &consumed);
         gKuroSession.popupPending = TRUE;
+        break;
+    case KURO_OP_TEAM_PUSH:
+        KuroTeams_ApplyPush(payload, length);
+        break;
+    case KURO_OP_TEAM_EXPORT_DONE:
+        if (length >= 1)
+        {
+            gKuroSession.exportOk = payload[0];
+            CopyText(gKuroSession.exportText, sizeof(gKuroSession.exportText), &payload[1], length - 1, &consumed);
+            gKuroSession.exportDone = TRUE;
+        }
         break;
     default:
         break;

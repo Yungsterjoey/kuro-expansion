@@ -3,9 +3,11 @@
 #include "bg.h"
 #include "constants/characters.h"
 #include "gpu_regs.h"
+#include "kuro_builder.h"
 #include "kuro_link.h"
 #include "kuro_playback.h"
 #include "kuro_session.h"
+#include "kuro_teams.h"
 #include "main.h"
 #include "malloc.h"
 #include "menu.h"
@@ -28,6 +30,8 @@ enum KuroMenuScreen
     SCREEN_MAIN,
     SCREEN_FORMATS,
     SCREEN_SEARCHING,
+    SCREEN_TEAM_PICK,
+    SCREEN_BUILDER,
 };
 
 #define WINDOW_MAIN 0
@@ -57,6 +61,9 @@ static EWRAM_DATA u8 sLastBridgeFlags = 0;
 static EWRAM_DATA u8 sPayload[KURO_MAX_PAYLOAD + 1] = {0};
 static EWRAM_DATA u8 sShownPopup[120] = {0};
 static EWRAM_DATA u16 sSearchFrames = 0;
+static EWRAM_DATA u8 sFormatCursor = 0;
+static EWRAM_DATA u8 sSearchTeam = 0;
+static EWRAM_DATA bool8 sTeamsLoaded = FALSE;
 
 EWRAM_DATA volatile u8 gKuroUiScreen = 0;
 
@@ -69,6 +76,10 @@ static const u8 sText_RomLabel[] = _("ROM: ");
 static const u8 sText_RelayLabel[] = _("\nRelay: ");
 static const u8 sText_SignedInAs[] = _("Signed in as ");
 static const u8 sText_FindBattle[] = _("Find Battle");
+static const u8 sText_TeamBuilder[] = _("Team Builder");
+static const u8 sText_ChooseTeam[] = _("Choose a team");
+static const u8 sText_NoTeams[] = _("No teams yet. Build one first.");
+static const u8 sText_Indent[] = _("  ");
 static const u8 sText_ChooseFormat[] = _("Choose a format");
 static const u8 sText_NoFormats[] = _("Waiting for the format list…");
 static const u8 sText_Searching[] = _("Searching for a battle…");
@@ -119,10 +130,34 @@ static void DrawScreen(void)
         StringCopy(buffer, sText_SignedInAs);
         StringAppend(buffer, gKuroSession.username);
         PrintLine(buffer, 0);
-        StringCopy(buffer, sText_Cursor);
+        StringCopy(buffer, sCursor == 0 ? sText_Cursor : sText_Indent);
         StringAppend(buffer, sText_FindBattle);
         PrintLine(buffer, LINE_HEIGHT * 2);
+        StringCopy(buffer, sCursor == 1 ? sText_Cursor : sText_Indent);
+        StringAppend(buffer, sText_TeamBuilder);
+        PrintLine(buffer, LINE_HEIGHT * 3);
         break;
+    case SCREEN_TEAM_PICK:
+        PrintLine(sText_ChooseTeam, 0);
+        y = LINE_HEIGHT * 2;
+        for (i = 0; i < KURO_TEAM_SLOTS; i++)
+        {
+            if (gKuroTeams[i].count == 0)
+                continue;
+            StringCopy(buffer, i == sCursor ? sText_Cursor : sText_Indent);
+            StringAppend(buffer, gKuroTeams[i].name);
+            PrintLine(buffer, y);
+            y += LINE_HEIGHT;
+        }
+        if (y == LINE_HEIGHT * 2)
+            PrintLine(sText_NoTeams, y);
+        if (sShownPopup[0] != EOS)
+            PrintLine(sShownPopup, LINE_HEIGHT * 7);
+        break;
+    case SCREEN_BUILDER:
+        KuroBuilder_Draw(WINDOW_MAIN);
+        CopyWindowToVram(WINDOW_MAIN, COPYWIN_FULL);
+        return;
     case SCREEN_FORMATS:
         PrintLine(sText_ChooseFormat, 0);
         if (gKuroSession.formatCount == 0)
@@ -198,18 +233,115 @@ static bool32 PumpLink(void)
     return FALSE;
 }
 
-static void HandleInput(void)
+static void StartSearch(u8 teamSlot)
 {
     u8 body[2];
 
+    body[0] = gKuroSession.formats[sFormatCursor].index;
+    body[1] = teamSlot;
+    if (teamSlot != KURO_NO_TEAM_SLOT && !KuroTeams_Upload(teamSlot))
+        return;
+    if (KuroLink_SendFrame(KURO_OP_SEARCH, body, sizeof(body)))
+    {
+        PlaySE(SE_SELECT);
+        sShownPopup[0] = EOS;
+        sSearchFrames = 0;
+        sSearchTeam = teamSlot;
+        SetScreen(SCREEN_SEARCHING);
+    }
+}
+
+static u8 FirstTeamSlot(void)
+{
+    u32 i;
+
+    for (i = 0; i < KURO_TEAM_SLOTS; i++)
+        if (gKuroTeams[i].count > 0)
+            return i;
+    return 0;
+}
+
+static void HandleTeamPick(void)
+{
+    s32 step = JOY_NEW(DPAD_DOWN) ? 1 : (JOY_NEW(DPAD_UP) ? -1 : 0);
+    u32 i;
+
+    if (JOY_NEW(B_BUTTON))
+    {
+        PlaySE(SE_SELECT);
+        SetScreen(SCREEN_FORMATS);
+        return;
+    }
+    if (step != 0)
+    {
+        s32 next = sCursor;
+
+        for (i = 0; i < KURO_TEAM_SLOTS; i++)
+        {
+            next = (next + step + KURO_TEAM_SLOTS) % KURO_TEAM_SLOTS;
+            if (gKuroTeams[next].count > 0)
+                break;
+        }
+        sCursor = next;
+        sDirty = TRUE;
+    }
+    if (JOY_NEW(A_BUTTON) && gKuroTeams[sCursor].count > 0)
+        StartSearch(sCursor);
+}
+
+// A team search has an answer: record the server's verdict for the team's legality badge.
+static void UpdateTeamVerdict(void)
+{
+    if (sSearchTeam == KURO_NO_TEAM_SLOT)
+        return;
+    if (gKuroSession.searchState == KURO_SEARCH_MATCHED)
+    {
+        gKuroTeams[sSearchTeam].badge = KURO_BADGE_PASSED;
+        KuroTeams_Save();
+        sSearchTeam = KURO_NO_TEAM_SLOT;
+    }
+    else if (gKuroSession.searchState == KURO_SEARCH_REJECTED)
+    {
+        u8 slot = sSearchTeam;
+
+        gKuroTeams[slot].badge = KURO_BADGE_FAILED;
+        KuroTeams_Save();
+        sSearchTeam = KURO_NO_TEAM_SLOT;
+        SetScreen(SCREEN_TEAM_PICK);
+        sCursor = slot;
+    }
+}
+
+static void HandleInput(void)
+{
     switch (sScreen)
     {
     case SCREEN_MAIN:
-        if (JOY_NEW(A_BUTTON))
+        if (JOY_NEW(DPAD_UP) || JOY_NEW(DPAD_DOWN))
+        {
+            sCursor = !sCursor;
+            sDirty = TRUE;
+        }
+        else if (JOY_NEW(A_BUTTON))
         {
             PlaySE(SE_SELECT);
-            SetScreen(SCREEN_FORMATS);
+            if (sCursor == 0)
+            {
+                SetScreen(SCREEN_FORMATS);
+            }
+            else
+            {
+                KuroBuilder_Open();
+                SetScreen(SCREEN_BUILDER);
+            }
         }
+        break;
+    case SCREEN_BUILDER:
+        if (KuroBuilder_HandleInput())
+            SetScreen(SCREEN_MAIN);
+        break;
+    case SCREEN_TEAM_PICK:
+        HandleTeamPick();
         break;
     case SCREEN_FORMATS:
         if (JOY_NEW(B_BUTTON))
@@ -229,14 +361,17 @@ static void HandleInput(void)
         }
         else if (JOY_NEW(A_BUTTON) && gKuroSession.formatCount > 0)
         {
-            body[0] = gKuroSession.formats[sCursor].index;
-            body[1] = 0xFF;
-            if (KuroLink_SendFrame(KURO_OP_SEARCH, body, sizeof(body)))
+            sFormatCursor = sCursor;
+            if (gKuroSession.formats[sCursor].flags & KURO_FORMAT_NEEDS_TEAM)
             {
                 PlaySE(SE_SELECT);
                 sShownPopup[0] = EOS;
-                sSearchFrames = 0;
-                SetScreen(SCREEN_SEARCHING);
+                SetScreen(SCREEN_TEAM_PICK);
+                sCursor = FirstTeamSlot();
+            }
+            else
+            {
+                StartSearch(KURO_NO_TEAM_SLOT);
             }
         }
         break;
@@ -277,8 +412,11 @@ static void CB2_KuroMenu(void)
         sDirty = TRUE;
 
     UpdateConnection();
+    UpdateTeamVerdict();
     if (!gPaletteFade.active)
         HandleInput();
+    if (sScreen == SCREEN_BUILDER && KuroBuilder_Tick())
+        sDirty = TRUE;
     if (sDirty)
     {
         sDirty = FALSE;
@@ -327,7 +465,16 @@ void CB2_KuroMenuStart(void)
     BeginNormalPaletteFade(PALETTES_ALL, 0, 16, 0, RGB_BLACK);
     SetVBlankCallback(VBlankCB_KuroMenu);
 
-    sScreen = gKuroSession.handshakeDone && !gKuroSession.mismatch ? SCREEN_MAIN : SCREEN_CONNECTING;
+    if (!sTeamsLoaded)
+    {
+        KuroTeams_Load();
+        sTeamsLoaded = TRUE;
+        sSearchTeam = KURO_NO_TEAM_SLOT;
+    }
+    if (KuroBuilder_IsOpen())
+        sScreen = SCREEN_BUILDER;
+    else
+        sScreen = gKuroSession.handshakeDone && !gKuroSession.mismatch ? SCREEN_MAIN : SCREEN_CONNECTING;
     sCursor = 0;
     sDirty = TRUE;
     sShownPopup[0] = EOS;
