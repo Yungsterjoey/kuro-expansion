@@ -161,6 +161,7 @@ struct KuroPlayback
     u8 stash[KURO_MAX_PAYLOAD + 1];
     u8 phase;
     u8 labelTimer;
+    bool8 forfeitPromptPending;
     u8 settle;
     bool8 haveRequest;
     bool8 requestAnswered;
@@ -1013,8 +1014,7 @@ static void OpenForfeitConfirm(void)
 
     ShowBattleText(sText_Forfeit);
     gBattleResources->bufferB[battler][1] = 0xFF;
-    BtlController_EmitYesNoBox(battler, B_COMM_TO_CONTROLLER);
-    MarkBattlerForControllerExec(battler);
+    sKuro.forfeitPromptPending = TRUE; // The box's colour codes would corrupt a message still printing.
     SetPhase(KURO_UI_FORFEIT);
 }
 
@@ -1023,6 +1023,7 @@ static void OpenDecision(void)
     sKuro.sawTurn = FALSE;
     sKuro.reopen = FALSE;
     sKuro.teraSelected = FALSE;
+    sKuro.forfeitPromptPending = FALSE;
     KuroLink_SetRomFlags(KURO_ROM_FLAG_BOOTED | KURO_ROM_FLAG_IN_BATTLE | KURO_ROM_FLAG_AWAITING_CHOICE);
     ApplyRequestParty();
     if (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_FORCE_SWITCH)
@@ -1070,6 +1071,17 @@ static void RunDecision(void)
         BattlePutTextOnWindow(sText_BattleMenu, B_WIN_ACTION_MENU);
     if (gBattleControllerExecFlags != 0)
         return;
+
+    if (sKuro.forfeitPromptPending)
+    {
+        if (!IsTextPrinterActiveOnWindow(B_WIN_MSG))
+        {
+            sKuro.forfeitPromptPending = FALSE;
+            BtlController_EmitYesNoBox(battler, B_COMM_TO_CONTROLLER);
+            MarkBattlerForControllerExec(battler);
+        }
+        return;
+    }
 
     switch (sKuro.phase)
     {
