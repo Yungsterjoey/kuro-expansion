@@ -63,7 +63,7 @@ static EWRAM_DATA u8 sLastFormatCount = 0;
 static EWRAM_DATA u8 sLastSearchState = 0;
 static EWRAM_DATA u8 sLastBridgeFlags = 0;
 static EWRAM_DATA u8 sPayload[KURO_MAX_PAYLOAD + 1] = {0};
-static EWRAM_DATA u8 sShownPopup[120] = {0};
+static EWRAM_DATA u8 sShownPopup[240] = {0};
 static EWRAM_DATA u16 sSearchFrames = 0;
 static EWRAM_DATA u8 sFormatCursor = 0;
 static EWRAM_DATA u8 sSearchTeam = 0;
@@ -97,6 +97,7 @@ static const u8 sText_FindBattle[] = _("Find Battle");
 static const u8 sText_TeamBuilder[] = _("Team Builder");
 static const u8 sText_ChooseTeam[] = _("Choose a team");
 static const u8 sText_NoTeams[] = _("No teams yet. Build one first.");
+static const u8 sText_PressAToContinue[] = _("Press A to continue.");
 static const u8 sText_Indent[] = _("  ");
 static const u8 sText_PreviewTitle[] = _("Team Preview");
 static const u8 sText_PreviewHelp[] = _("A: choose order  B: undo");
@@ -174,6 +175,13 @@ static void DrawScreen(void)
         PrintLine(buffer, LINE_HEIGHT * 3);
         break;
     case SCREEN_TEAM_PICK:
+        if (sShownPopup[0] != EOS)
+        {
+            // The server's reason gets the whole window; it can run to several lines.
+            PrintLine(sShownPopup, 0);
+            PrintLine(sText_PressAToContinue, LINE_HEIGHT * 7);
+            break;
+        }
         PrintLine(sText_ChooseTeam, 0);
         y = LINE_HEIGHT * 2;
         for (i = 0; i < KURO_TEAM_SLOTS; i++)
@@ -187,8 +195,6 @@ static void DrawScreen(void)
         }
         if (y == LINE_HEIGHT * 2)
             PrintLine(sText_NoTeams, y);
-        if (sShownPopup[0] != EOS)
-            PrintLine(sShownPopup, LINE_HEIGHT * 7);
         break;
     case SCREEN_BUILDER:
         KuroBuilder_Draw(WINDOW_MAIN);
@@ -226,7 +232,7 @@ static void DrawScreen(void)
             StringAppend(end, sText_Close);
             PrintLine(buffer, y);
         }
-        y = LINE_HEIGHT * 4;
+        y = LINE_HEIGHT * 3;
         for (i = 0; i < ARRAY_COUNT(sResultRows); i++)
         {
             StringCopy(buffer, i == sCursor ? sText_Cursor : sText_Indent);
@@ -235,7 +241,7 @@ static void DrawScreen(void)
             y += LINE_HEIGHT;
         }
         if (sShownPopup[0] != EOS)
-            PrintLine(sShownPopup, LINE_HEIGHT * 7);
+            PrintLine(sShownPopup, LINE_HEIGHT * 6);
         break;
     case SCREEN_FORMATS:
         PrintLine(sText_ChooseFormat, 0);
@@ -553,6 +559,16 @@ static void HandleTeamPick(void)
     s32 step = JOY_NEW(DPAD_DOWN) ? 1 : (JOY_NEW(DPAD_UP) ? -1 : 0);
     u32 i;
 
+    if (sShownPopup[0] != EOS)
+    {
+        if (JOY_NEW(A_BUTTON) || JOY_NEW(B_BUTTON))
+        {
+            PlaySE(SE_SELECT);
+            sShownPopup[0] = EOS;
+            sDirty = TRUE;
+        }
+        return;
+    }
     if (JOY_NEW(B_BUTTON))
     {
         PlaySE(SE_SELECT);

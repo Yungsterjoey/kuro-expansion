@@ -72,7 +72,7 @@ struct KuroSession
     u8 resultOpponent[20];
     u8 username[20];
     u8 detail[100];
-    u8 popup[120];
+    u8 popup[240];
     u8 relayBuild[40];
     u8 exportText[40];
     struct KuroFormat formats[KURO_MAX_FORMATS];
