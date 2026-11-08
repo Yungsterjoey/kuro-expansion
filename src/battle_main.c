@@ -1759,6 +1759,11 @@ static void FreeRestoreBattleData(void)
     ResetDynamicAiFunctions();
 }
 
+void KuroFreeBattleData(void) // KURO: lets puppet mode leave a battle without the turn engine
+{
+    FreeRestoreBattleData();
+}
+
 void CB2_QuitRecordedBattle(void)
 {
     UpdatePaletteFade();

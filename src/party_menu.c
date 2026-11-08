@@ -47,6 +47,7 @@
 #include "overworld.h"
 #include "palette.h"
 #include "party_menu.h"
+#include "kuro_playback.h" // KURO: puppet mode battle flag
 #include "player_pc.h"
 #include "pokemon.h"
 #include "pokemon_icon.h"
@@ -2944,6 +2945,18 @@ static void SetPartyMonSelectionActions(struct Pokemon *mons, u8 slotId, u8 acti
         sPartyMenuInternal->numActions = sPartyMenuActionCounts[action];
         for (i = 0; i < sPartyMenuInternal->numActions; i++)
             sPartyMenuInternal->actions[i] = sPartyMenuActions[action][i];
+    }
+
+    if (gBattleTypeFlags & BATTLE_TYPE_KURO_REMOTE) // KURO: Summary leaks window buffers in puppet battles and exhausts the heap
+    {
+        u32 kept = 0;
+
+        for (u32 k = 0; k < sPartyMenuInternal->numActions; k++)
+        {
+            if (sPartyMenuInternal->actions[k] != MENU_SUMMARY)
+                sPartyMenuInternal->actions[kept++] = sPartyMenuInternal->actions[k];
+        }
+        sPartyMenuInternal->numActions = kept;
     }
 }
 
