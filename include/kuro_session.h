@@ -19,6 +19,11 @@
 #define KURO_OP_TEAM_EXPORT 0x14
 #define KURO_OP_SAVE_REPLAY 0x15
 #define KURO_OP_ERR_VERSION 0xE1
+#define KURO_OP_CHOOSE_TEAM_ORDER 0x22
+#define KURO_FRAME_TEAM_PREVIEW 0x41
+#define KURO_FRAME_REQUEST 0x42
+#define KURO_REQUEST_FLAG_WAIT 8
+#define KURO_REQUEST_FLAG_TEAM_PREVIEW 16
 
 #define KURO_MAX_FORMATS 8
 #define KURO_FORMAT_NAME_LENGTH 40
@@ -60,6 +65,11 @@ struct KuroSession
     bool8 teamPushed;
     bool8 exportDone;
     bool8 exportOk;
+    bool8 resultPending;
+    u8 resultKind;
+    s16 ratingChange;
+    u16 rating;
+    u8 resultOpponent[20];
     u8 username[20];
     u8 detail[100];
     u8 popup[120];

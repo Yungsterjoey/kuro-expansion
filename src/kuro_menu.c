@@ -12,6 +12,8 @@
 #include "malloc.h"
 #include "menu.h"
 #include "palette.h"
+#include "pokemon.h"
+#include "pokemon_icon.h"
 #include "scanline_effect.h"
 #include "sound.h"
 #include "sprite.h"
@@ -32,6 +34,8 @@ enum KuroMenuScreen
     SCREEN_SEARCHING,
     SCREEN_TEAM_PICK,
     SCREEN_BUILDER,
+    SCREEN_PREVIEW,
+    SCREEN_RESULT,
 };
 
 #define WINDOW_MAIN 0
@@ -64,6 +68,19 @@ static EWRAM_DATA u16 sSearchFrames = 0;
 static EWRAM_DATA u8 sFormatCursor = 0;
 static EWRAM_DATA u8 sSearchTeam = 0;
 static EWRAM_DATA bool8 sTeamsLoaded = FALSE;
+static EWRAM_DATA u8 sLastTeamSlot = 0;
+static EWRAM_DATA u8 sPendingStart[KURO_MAX_PAYLOAD + 1] = {0};
+static EWRAM_DATA u16 sPendingStartLength = 0;
+static EWRAM_DATA bool8 sHavePendingStart = FALSE;
+static EWRAM_DATA bool8 sPreviewAnswered = FALSE;
+static EWRAM_DATA u8 sOurCount = 0;
+static EWRAM_DATA u8 sFoeCount = 0;
+static EWRAM_DATA u16 sOurSpecies[PARTY_SIZE] = {0};
+static EWRAM_DATA u16 sFoeSpecies[PARTY_SIZE] = {0};
+static EWRAM_DATA u8 sOrder[PARTY_SIZE] = {0};
+static EWRAM_DATA u8 sOrderCount = 0;
+static EWRAM_DATA u8 sIconIds[PARTY_SIZE * 2] = {0};
+static EWRAM_DATA bool8 sIconsUp = FALSE;
 
 EWRAM_DATA volatile u8 gKuroUiScreen = 0;
 
@@ -80,6 +97,24 @@ static const u8 sText_TeamBuilder[] = _("Team Builder");
 static const u8 sText_ChooseTeam[] = _("Choose a team");
 static const u8 sText_NoTeams[] = _("No teams yet. Build one first.");
 static const u8 sText_Indent[] = _("  ");
+static const u8 sText_PreviewTitle[] = _("Team Preview");
+static const u8 sText_PreviewHelp[] = _("A: choose order  B: undo");
+static const u8 sText_PreviewYours[] = _("Your team");
+static const u8 sText_PreviewFoe[] = _("Their team");
+static const u8 sText_PreviewWaiting[] = _("Waiting for the opponent…");
+static const u8 sText_YouWon[] = _("You won!");
+static const u8 sText_YouLost[] = _("You lost.");
+static const u8 sText_Tied[] = _("It was a tie.");
+static const u8 sText_Versus[] = _("vs. ");
+static const u8 sText_Rating[] = _("Rating ");
+static const u8 sText_ResultMenu[] = _("Main menu");
+static const u8 sText_ResultRematch[] = _("Battle again");
+static const u8 sText_ResultReplay[] = _("Save replay");
+static const u8 sText_Plus[] = _("+");
+static const u8 sText_Minus[] = _("-");
+static const u8 sText_Open[] = _(" (");
+static const u8 sText_Close[] = _(")");
+static const u8 *const sResultRows[] = {sText_ResultMenu, sText_ResultRematch, sText_ResultReplay};
 static const u8 sText_ChooseFormat[] = _("Choose a format");
 static const u8 sText_NoFormats[] = _("Waiting for the format list…");
 static const u8 sText_Searching[] = _("Searching for a battle…");
@@ -158,6 +193,49 @@ static void DrawScreen(void)
         KuroBuilder_Draw(WINDOW_MAIN);
         CopyWindowToVram(WINDOW_MAIN, COPYWIN_FULL);
         return;
+    case SCREEN_PREVIEW:
+        PrintLine(sPreviewAnswered ? sText_PreviewWaiting : sText_PreviewTitle, 0);
+        PrintLine(sText_PreviewYours, LINE_HEIGHT);
+        for (i = 0; i < sOrderCount; i++)
+        {
+            ConvertIntToDecimalStringN(buffer, i + 1, STR_CONV_MODE_LEFT_ALIGN, 1);
+            AddTextPrinterParameterized(WINDOW_MAIN, FONT_NORMAL, buffer, 12 + sOrder[i] * 32, LINE_HEIGHT * 3, TEXT_SKIP_DRAW, NULL);
+        }
+        if (!sPreviewAnswered)
+            AddTextPrinterParameterized(WINDOW_MAIN, FONT_NORMAL, sText_Cursor, sCursor * 32, LINE_HEIGHT * 3, TEXT_SKIP_DRAW, NULL);
+        PrintLine(sText_PreviewFoe, LINE_HEIGHT * 4);
+        PrintLine(sText_PreviewHelp, LINE_HEIGHT * 7);
+        break;
+    case SCREEN_RESULT:
+        y = 0;
+        PrintLine(gKuroSession.resultKind == 1 ? sText_YouWon : (gKuroSession.resultKind == 2 ? sText_YouLost : sText_Tied), y);
+        y += LINE_HEIGHT;
+        StringCopy(buffer, sText_Versus);
+        StringAppend(buffer, gKuroSession.resultOpponent);
+        PrintLine(buffer, y);
+        y += LINE_HEIGHT;
+        if (gKuroSession.rating != 0)
+        {
+            u8 *end = StringCopy(buffer, sText_Rating);
+
+            ConvertIntToDecimalStringN(end, gKuroSession.rating, STR_CONV_MODE_LEFT_ALIGN, 4);
+            end = StringAppend(end, sText_Open);
+            end = StringAppend(end, gKuroSession.ratingChange >= 0 ? sText_Plus : sText_Minus);
+            ConvertIntToDecimalStringN(end, abs(gKuroSession.ratingChange), STR_CONV_MODE_LEFT_ALIGN, 4);
+            StringAppend(end, sText_Close);
+            PrintLine(buffer, y);
+        }
+        y = LINE_HEIGHT * 4;
+        for (i = 0; i < ARRAY_COUNT(sResultRows); i++)
+        {
+            StringCopy(buffer, i == sCursor ? sText_Cursor : sText_Indent);
+            StringAppend(buffer, sResultRows[i]);
+            PrintLine(buffer, y);
+            y += LINE_HEIGHT;
+        }
+        if (sShownPopup[0] != EOS)
+            PrintLine(sShownPopup, LINE_HEIGHT * 7);
+        break;
     case SCREEN_FORMATS:
         PrintLine(sText_ChooseFormat, 0);
         if (gKuroSession.formatCount == 0)
@@ -215,22 +293,213 @@ static void UpdateConnection(void)
         SetScreen(SCREEN_CONNECTING);
 }
 
+static bool32 HandlePreviewFrame(u8 opcode, u16 length);
+static void StartSearch(u8 teamSlot);
+static bool32 TryStartPendingBattle(void);
+
 // Returns TRUE when a battle has begun and this screen has handed over.
 static bool32 PumpLink(void)
 {
     u8 opcode;
     u16 length;
 
-    while (KuroLink_ReadFrame(&opcode, sPayload, &length) == KURO_LINK_READ_OK)
+    for (;;)
     {
+        if (TryStartPendingBattle())
+            return TRUE;
+        if (KuroLink_ReadFrame(&opcode, sPayload, &length) != KURO_LINK_READ_OK)
+            break;
         if (opcode >= KURO_FIRST_BATTLE_OPCODE)
         {
+            if (HandlePreviewFrame(opcode, length))
+                continue;
             KuroPlayback_StartClientBattle(opcode, sPayload, length);
             return TRUE;
         }
         KuroSession_HandleFrame(opcode, sPayload, length);
     }
     return FALSE;
+}
+
+// Team preview runs here, before the battle scene exists.
+#define OP_RESYNC_BEGIN 0x63
+#define OP_RESYNC_END 0x64
+#define OP_BATTLE_START 0x40
+#define REQUEST_FLAGS_OFFSET 2
+#define REQUEST_PARTY_COUNT_OFFSET 28
+#define REQUEST_PARTY_OFFSET 29
+#define REQUEST_MEMBER_SIZE 25
+
+static void DestroyIcons(void)
+{
+    u32 i;
+
+    if (!sIconsUp)
+        return;
+    for (i = 0; i < sOurCount + sFoeCount; i++)
+        FreeAndDestroyMonIconSprite(&gSprites[sIconIds[i]]);
+    FreeMonIconPalettes();
+    sIconsUp = FALSE;
+}
+
+static void ShowPreview(void)
+{
+    u32 i;
+
+    DestroyIcons();
+    LoadMonIconPalettes();
+    for (i = 0; i < sOurCount; i++)
+        sIconIds[i] = CreateMonIcon(sOurSpecies[i], SpriteCallbackDummy, 40 + i * 32, 56, 1, 0);
+    for (i = 0; i < sFoeCount; i++)
+        sIconIds[sOurCount + i] = CreateMonIcon(sFoeSpecies[i], SpriteCallbackDummy, 40 + i * 32, 104, 1, 0);
+    for (i = 0; i < sOurCount + sFoeCount; i++)
+        gSprites[sIconIds[i]].oam.priority = 0;
+    sIconsUp = TRUE;
+    sOrderCount = 0;
+    sScreen = SCREEN_PREVIEW;
+    sCursor = 0;
+    sDirty = TRUE;
+}
+
+static void StoreRequestParty(u16 length)
+{
+    u32 i, count = sPayload[REQUEST_PARTY_COUNT_OFFSET];
+
+    if (length < REQUEST_PARTY_OFFSET || count > PARTY_SIZE)
+        return;
+    sOurCount = count;
+    for (i = 0; i < count; i++)
+    {
+        const u8 *member = &sPayload[REQUEST_PARTY_OFFSET + i * REQUEST_MEMBER_SIZE];
+
+        sOurSpecies[i] = member[0] | (member[1] << 8);
+    }
+}
+
+// Returns TRUE if the frame belongs to team preview and was consumed.
+static bool32 HandlePreviewFrame(u8 opcode, u16 length)
+{
+    u32 i;
+
+    if (opcode == OP_RESYNC_BEGIN && (sHavePendingStart || sScreen == SCREEN_PREVIEW))
+        return TRUE;
+    if (opcode == OP_RESYNC_END && (sHavePendingStart || sScreen == SCREEN_PREVIEW))
+    {
+        if (sFoeCount > 0)
+            ShowPreview();
+        return TRUE;
+    }
+    if (opcode == OP_BATTLE_START)
+    {
+        memcpy(sPendingStart, sPayload, length);
+        sPendingStartLength = length;
+        sHavePendingStart = TRUE;
+        sPreviewAnswered = FALSE;
+        sFoeCount = 0;
+        return TRUE;
+    }
+    if (!sHavePendingStart)
+        return FALSE;
+    if (opcode == KURO_FRAME_TEAM_PREVIEW)
+    {
+        sFoeCount = min(sPayload[2], PARTY_SIZE);
+        for (i = 0; i < sFoeCount; i++)
+            sFoeSpecies[i] = sPayload[3 + i * 3] | (sPayload[4 + i * 3] << 8);
+        return TRUE;
+    }
+    if (opcode == KURO_FRAME_REQUEST && sFoeCount > 0 && !sPreviewAnswered && (sPayload[REQUEST_FLAGS_OFFSET] & KURO_REQUEST_FLAG_TEAM_PREVIEW))
+    {
+        StoreRequestParty(length);
+        if (sPayload[REQUEST_FLAGS_OFFSET] & KURO_REQUEST_FLAG_WAIT)
+            sPreviewAnswered = TRUE;
+        ShowPreview();
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void StartPendingBattle(void)
+{
+    DestroyIcons();
+    sHavePendingStart = FALSE;
+    sFoeCount = 0;
+    KuroPlayback_StartClientBattle(OP_BATTLE_START, sPendingStart, sPendingStartLength);
+}
+
+// A battle with no team preview, or one whose preview has been answered, starts on the next battle frame.
+static bool32 TryStartPendingBattle(void)
+{
+    s32 next;
+
+    if (!sHavePendingStart || (sFoeCount > 0 && !sPreviewAnswered))
+        return FALSE;
+    next = KuroLink_PeekOpcode();
+    if (next < KURO_FIRST_BATTLE_OPCODE || next == KURO_FRAME_TEAM_PREVIEW || next == OP_RESYNC_BEGIN || next == OP_BATTLE_START)
+        return FALSE;
+    StartPendingBattle();
+    return TRUE;
+}
+
+static void HandlePreviewInput(void)
+{
+    u32 i;
+    u8 body[PARTY_SIZE] = {0};
+
+    if (sPreviewAnswered)
+        return;
+    if (JOY_NEW(DPAD_RIGHT) && sCursor + 1 < sOurCount)
+    {
+        sCursor++;
+        sDirty = TRUE;
+    }
+    else if (JOY_NEW(DPAD_LEFT) && sCursor > 0)
+    {
+        sCursor--;
+        sDirty = TRUE;
+    }
+    else if (JOY_NEW(B_BUTTON) && sOrderCount > 0)
+    {
+        sOrderCount--;
+        PlaySE(SE_SELECT);
+        sDirty = TRUE;
+    }
+    else if (JOY_NEW(A_BUTTON))
+    {
+        for (i = 0; i < sOrderCount; i++)
+            if (sOrder[i] == sCursor)
+                return;
+        sOrder[sOrderCount++] = sCursor;
+        PlaySE(SE_SELECT);
+        sDirty = TRUE;
+        if (sOrderCount == sOurCount)
+        {
+            for (i = 0; i < sOrderCount; i++)
+                body[i] = sOrder[i] + 1;
+            if (KuroLink_SendFrame(KURO_OP_CHOOSE_TEAM_ORDER, body, PARTY_SIZE))
+                sPreviewAnswered = TRUE;
+        }
+    }
+}
+
+static void HandleResultInput(void)
+{
+    if (JOY_NEW(DPAD_DOWN) || JOY_NEW(DPAD_UP))
+    {
+        s32 step = JOY_NEW(DPAD_DOWN) ? 1 : -1;
+
+        sCursor = (sCursor + step + ARRAY_COUNT(sResultRows)) % ARRAY_COUNT(sResultRows);
+        sDirty = TRUE;
+    }
+    else if (JOY_NEW(A_BUTTON))
+    {
+        PlaySE(SE_SELECT);
+        if (sCursor == 0)
+            SetScreen(SCREEN_MAIN);
+        else if (sCursor == 1)
+            StartSearch(sLastTeamSlot);
+        else if (KuroLink_SendFrame(KURO_OP_SAVE_REPLAY, NULL, 0))
+            sDirty = TRUE;
+    }
 }
 
 static void StartSearch(u8 teamSlot)
@@ -241,6 +510,7 @@ static void StartSearch(u8 teamSlot)
     body[1] = teamSlot;
     if (teamSlot != KURO_NO_TEAM_SLOT && !KuroTeams_Upload(teamSlot))
         return;
+    sLastTeamSlot = teamSlot;
     if (KuroLink_SendFrame(KURO_OP_SEARCH, body, sizeof(body)))
     {
         PlaySE(SE_SELECT);
@@ -342,6 +612,12 @@ static void HandleInput(void)
         break;
     case SCREEN_TEAM_PICK:
         HandleTeamPick();
+        break;
+    case SCREEN_PREVIEW:
+        HandlePreviewInput();
+        break;
+    case SCREEN_RESULT:
+        HandleResultInput();
         break;
     case SCREEN_FORMATS:
         if (JOY_NEW(B_BUTTON))
@@ -471,7 +747,12 @@ void CB2_KuroMenuStart(void)
         sTeamsLoaded = TRUE;
         sSearchTeam = KURO_NO_TEAM_SLOT;
     }
-    if (KuroBuilder_IsOpen())
+    if (gKuroSession.resultPending)
+    {
+        gKuroSession.resultPending = FALSE;
+        sScreen = SCREEN_RESULT;
+    }
+    else if (KuroBuilder_IsOpen())
         sScreen = SCREEN_BUILDER;
     else
         sScreen = gKuroSession.handshakeDone && !gKuroSession.mismatch ? SCREEN_MAIN : SCREEN_CONNECTING;

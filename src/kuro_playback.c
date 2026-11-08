@@ -161,6 +161,10 @@ struct KuroPlayback
     u8 stash[KURO_MAX_PAYLOAD + 1];
     u8 phase;
     u8 labelTimer;
+    u16 revealed[2][PARTY_SIZE][MAX_MON_MOVES];
+    bool8 inspecting;
+    u8 inspectView;
+    u16 inspectBg0Y;
     bool8 forfeitPromptPending;
     u8 settle;
     bool8 haveRequest;
@@ -409,6 +413,24 @@ static void QueueSwitchIn(const u8 *payload, u16 length)
     AddAction(KURO_ACT_SWITCH_IN, battler, slot);
 }
 
+static void RecordRevealedMove(enum BattlerId battler, u16 move)
+{
+    u32 side = GetBattlerSide(battler), slot = gBattlerPartyIndexes[battler], i;
+
+    if (move == MOVE_NONE || slot >= PARTY_SIZE)
+        return;
+    for (i = 0; i < MAX_MON_MOVES; i++)
+    {
+        if (sKuro.revealed[side][slot][i] == move)
+            return;
+        if (sKuro.revealed[side][slot][i] == MOVE_NONE)
+        {
+            sKuro.revealed[side][slot][i] = move;
+            return;
+        }
+    }
+}
+
 static void QueueMove(const u8 *payload)
 {
     enum BattlerId battler = BattlerFromPosition(payload[2]);
@@ -416,6 +438,7 @@ static void QueueMove(const u8 *payload)
     u8 flags = payload[6];
     u8 *text = NextTextBuffer();
 
+    RecordRevealedMove(battler, move);
     BuildBattlerName(text, battler);
     StringAppend(text, sText_Used);
     StringAppend(text, GetMoveName(move));
@@ -569,8 +592,18 @@ static void EndResync(void)
     }
 }
 
-static void QueueBattleEnd(const u8 *payload)
+static void QueueBattleEnd(const u8 *payload, u16 length)
 {
+    u16 end = 3;
+
+    while (end < length && payload[end] != EOS)
+        end++;
+    gKuroSession.resultKind = payload[2];
+    gKuroSession.ratingChange = (end + 3u <= length) ? (s16)ReadU16(&payload[end + 1]) : 0;
+    gKuroSession.rating = (end + 5u <= length) ? ReadU16(&payload[end + 3]) : 0;
+    StringCopyN(gKuroSession.resultOpponent, sKuro.opponentName, sizeof(gKuroSession.resultOpponent) - 1);
+    gKuroSession.resultOpponent[sizeof(gKuroSession.resultOpponent) - 1] = EOS;
+    gKuroSession.resultPending = sKuro.isClient;
     switch (payload[2])
     {
     case 1: AddText(sText_YouWon); break;
@@ -753,7 +786,7 @@ static bool32 FetchNextEvent(void)
         AddAction(KURO_ACT_ABILITY_POPUP, BattlerFromPosition(payload[2]), ReadU16(&payload[3]));
         break;
     case KURO_OP_MESSAGE: AddText(&payload[2]); break;
-    case KURO_OP_BATTLE_END: QueueBattleEnd(payload); break;
+    case KURO_OP_BATTLE_END: QueueBattleEnd(payload, length); break;
     default:
         if (sKuro.isWire)
             QueueTx(KURO_OP_ERR_DESYNC, sKuro.lastSeq);
@@ -1060,6 +1093,95 @@ static bool32 HasMoveToShow(void)
 }
 
 // Handles the player's input once the open menu's controller has gone idle.
+static const u8 sText_InspectNone[] = _("No boosts");
+static const u8 sText_InspectMoves[] = _("Seen: ");
+static const u8 sText_InspectNoMoves[] = _("No moves seen yet");
+static const u8 sText_Comma[] = _(", ");
+static const u8 sText_Newline[] = _("\n");
+static const u8 sText_Plus[] = _("+");
+static const u8 sText_Minus[] = _("-");
+static const u8 sText_Space[] = _(" ");
+static const u8 sStatLabelAtk[] = _("Atk"), sStatLabelDef[] = _("Def"), sStatLabelSpe[] = _("Spe"), sStatLabelSpa[] = _("SpA");
+static const u8 sStatLabelSpd[] = _("SpD"), sStatLabelAcc[] = _("Acc"), sStatLabelEva[] = _("Eva");
+static const u8 *const sStatLabels[NUM_BATTLE_STATS] = {NULL, sStatLabelAtk, sStatLabelDef, sStatLabelSpe, sStatLabelSpa, sStatLabelSpd, sStatLabelAcc, sStatLabelEva};
+
+// Hold R: what both players have seen, as on the official client. L changes the view.
+static void DrawInspect(void)
+{
+    u8 *out = gDisplayedStringBattle;
+    enum BattlerId battler = GetBattlerAtPosition(sKuro.inspectView == 2 ? B_POSITION_PLAYER_LEFT : B_POSITION_OPPONENT_LEFT);
+    u32 side = GetBattlerSide(battler), slot = gBattlerPartyIndexes[battler], i, shown = 0;
+
+    out = StringCopy(out, sKuro.names[battler]);
+    out = StringAppend(out, sText_Newline);
+    if (sKuro.inspectView == 1)
+    {
+        for (i = 0; i < MAX_MON_MOVES && slot < PARTY_SIZE && sKuro.revealed[side][slot][i] != MOVE_NONE; i++)
+        {
+            if (i == 2)
+                out = StringAppend(out, sText_Newline);
+            else if (i > 0)
+                out = StringAppend(out, sText_Comma);
+            out = StringAppend(out, GetMoveName(sKuro.revealed[side][slot][i]));
+            shown++;
+        }
+        if (shown == 0)
+            StringAppend(out, sText_InspectNoMoves);
+    }
+    else
+    {
+        for (i = STAT_ATK; i < NUM_BATTLE_STATS; i++)
+        {
+            s32 stage = (s32)gBattleMons[battler].statStages[i] - DEFAULT_STAT_STAGE;
+
+            if (stage == 0)
+                continue;
+            if (shown > 0)
+                out = StringAppend(out, shown == 3 ? sText_Newline : sText_Space);
+            out = StringAppend(out, sStatLabels[i]);
+            if (stage > 0)
+                out = StringAppend(out, sText_Plus);
+            else
+                out = StringAppend(out, sText_Minus);
+            ConvertIntToDecimalStringN(out, abs(stage), STR_CONV_MODE_LEFT_ALIGN, 2);
+            out += StringLength(out);
+            shown++;
+        }
+        if (shown == 0)
+            StringAppend(out, sText_InspectNone);
+    }
+    gBattle_BG0_X = 0;
+    gBattle_BG0_Y = 0;
+    BattlePutTextOnWindow(gDisplayedStringBattle, B_WIN_MSG);
+}
+
+// Returns TRUE while the inspect panel is up; the menu underneath is left waiting.
+static bool32 UpdateInspect(void)
+{
+    if ((sKuro.phase != KURO_UI_ACTION && sKuro.phase != KURO_UI_MOVE) || !JOY_HELD(R_BUTTON))
+    {
+        if (sKuro.inspecting)
+        {
+            sKuro.inspecting = FALSE;
+            gBattle_BG0_Y = sKuro.inspectBg0Y;
+        }
+        return FALSE;
+    }
+    if (!sKuro.inspecting)
+    {
+        sKuro.inspecting = TRUE;
+        sKuro.inspectView = 0;
+        sKuro.inspectBg0Y = gBattle_BG0_Y;
+        DrawInspect();
+    }
+    else if (JOY_NEW(L_BUTTON) && !IsTextPrinterActiveOnWindow(B_WIN_MSG)) // The printer still reads this buffer.
+    {
+        sKuro.inspectView = (sKuro.inspectView + 1) % 3;
+        DrawInspect();
+    }
+    return TRUE;
+}
+
 static void RunDecision(void)
 {
     enum BattlerId battler = PlayerBattler();
@@ -1069,6 +1191,10 @@ static void RunDecision(void)
 
     if (sKuro.labelTimer != 0 && --sKuro.labelTimer == 0)
         BattlePutTextOnWindow(sText_BattleMenu, B_WIN_ACTION_MENU);
+    // Runs first: the choice menu keeps the controller busy the whole time it is open.
+    if (UpdateInspect())
+        return;
+
     if (gBattleControllerExecFlags != 0)
         return;
 
