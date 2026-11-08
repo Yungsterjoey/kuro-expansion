@@ -17,6 +17,7 @@ enum KuroPlaybackStatus
 // Read by the headless harness in tools/regress.
 extern volatile u16 gKuroAckSeq;
 extern volatile u8 gKuroStatus;
+extern const volatile u8 gKuroM0FixtureIndex;
 
 void CB2_KuroM0Start(void);
 void KuroPlayback_Main(void);

@@ -21,6 +21,7 @@
 #include "string_util.h"
 #include "text.h"
 #include "data/kuro_m0_frames.h"
+#include "data/kuro_m0_frames_switches.h"
 
 enum KuroOpcode
 {
@@ -99,6 +100,8 @@ struct KuroPlayback
     u16 timer;
     u16 cursor;
     u16 ackSeq;
+    u16 framesSize;
+    const u8 *frames;
     bool8 needsAck;
     bool8 battlerActive[MAX_BATTLERS_COUNT];
     u8 partyCount[NUM_BATTLE_SIDES];
@@ -110,6 +113,21 @@ struct KuroPlayback
 EWRAM_DATA volatile u16 gKuroAckSeq = 0;
 EWRAM_DATA volatile u8 gKuroStatus = KURO_STATUS_RUNNING;
 static EWRAM_DATA struct KuroPlayback sKuro = {0};
+
+struct KuroFixture
+{
+    const u8 *frames;
+    u16 size;
+};
+
+static const struct KuroFixture sKuroFixtures[] =
+{
+    {sKuroM0Frames, sizeof(sKuroM0Frames)},
+    {sKuroM0FramesSwitches, sizeof(sKuroM0FramesSwitches)},
+};
+
+// Patched in a copy of the ROM by tools/regress/run.sh to choose the fixture.
+const volatile u8 gKuroM0FixtureIndex = 0;
 
 static const u8 sText_Foe[] = _("Foe ");
 static const u8 sText_GoSpace[] = _("Go! ");
@@ -391,9 +409,14 @@ static void QueueEffectiveness(const u8 *payload)
 static void QueueField(const u8 *payload)
 {
     u8 condition = payload[2];
+    enum BattlerId battler = GetBattlerAtPosition(B_POSITION_PLAYER_LEFT);
 
-    if (condition != 0 && condition < ARRAY_COUNT(sKuroWeatherAnims) && payload[3] != 1)
-        AddAction(KURO_ACT_BATTLE_ANIM, GetBattlerAtPosition(B_POSITION_PLAYER_LEFT), sKuroWeatherAnims[condition]);
+    // Weather animations read the owner's sprite, so an emptied slot cannot own one.
+    if (!sKuro.battlerActive[battler])
+        battler = GetBattlerAtPosition(B_POSITION_OPPONENT_LEFT);
+
+    if (condition != 0 && condition < ARRAY_COUNT(sKuroWeatherAnims) && payload[3] != 1 && sKuro.battlerActive[battler])
+        AddAction(KURO_ACT_BATTLE_ANIM, battler, sKuroWeatherAnims[condition]);
 }
 
 static void QueueBattleEnd(const u8 *payload)
@@ -412,14 +435,14 @@ static bool32 IsFrameValid(u16 cursor, u16 *outLength)
     u16 length, i;
     u8 checksum = 0;
 
-    if (cursor + 3u > sizeof(sKuroM0Frames))
+    if (cursor + 3u > sKuro.framesSize)
         return FALSE;
-    length = ReadU16(&sKuroM0Frames[cursor + 1]);
-    if (cursor + 3u + length + 1u > sizeof(sKuroM0Frames))
+    length = ReadU16(&sKuro.frames[cursor + 1]);
+    if (cursor + 3u + length + 1u > sKuro.framesSize)
         return FALSE;
     for (i = 0; i < 3u + length; i++)
-        checksum ^= sKuroM0Frames[cursor + i];
-    if (checksum != sKuroM0Frames[cursor + 3 + length])
+        checksum ^= sKuro.frames[cursor + i];
+    if (checksum != sKuro.frames[cursor + 3 + length])
         return FALSE;
     *outLength = length;
     return TRUE;
@@ -432,7 +455,7 @@ static bool32 FetchNextEvent(void)
     u8 opcode;
     const u8 *payload;
 
-    if (sKuro.cursor >= sizeof(sKuroM0Frames))
+    if (sKuro.cursor >= sKuro.framesSize)
     {
         HaltWithError();
         return FALSE;
@@ -443,14 +466,14 @@ static bool32 FetchNextEvent(void)
         return FALSE;
     }
 
-    opcode = sKuroM0Frames[sKuro.cursor];
-    payload = &sKuroM0Frames[sKuro.cursor + 3];
+    opcode = sKuro.frames[sKuro.cursor];
+    payload = &sKuro.frames[sKuro.cursor + 3];
     sKuro.cursor += 3 + length + 1;
     sKuro.ackSeq = ReadU16(payload);
     sKuro.actionCount = 0;
     sKuro.actionIndex = 0;
     sKuro.subStep = 0;
-    sKuro.needsAck = (opcode >= KURO_OP_SWITCH_IN);
+    sKuro.needsAck = (opcode >= KURO_OP_SWITCH_IN && opcode <= KURO_OP_MESSAGE);
 
     switch (opcode)
     {
@@ -644,11 +667,18 @@ void KuroPlayback_Main(void)
 
 void CB2_KuroM0Start(void)
 {
+    u32 fixture;
+
     // Boot seeds the RNG from the RTC; fixed seeds keep presentation identical on every run.
     SeedRng(KURO_RNG_SEED);
     SeedRng2(KURO_RNG_SEED);
 
     memset(&sKuro, 0, sizeof(sKuro));
+    fixture = gKuroM0FixtureIndex;
+    if (fixture >= ARRAY_COUNT(sKuroFixtures))
+        fixture = 0;
+    sKuro.frames = sKuroFixtures[fixture].frames;
+    sKuro.framesSize = sKuroFixtures[fixture].size;
     gKuroAckSeq = 0;
     gKuroStatus = KURO_STATUS_RUNNING;
 
