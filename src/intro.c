@@ -1107,7 +1107,7 @@ static u8 SetUpCopyrightScreen(void)
         if (UpdatePaletteFade())
             break;
 #if KURO_M0_PLAYBACK // KURO: M0 boots straight into fixture playback
-        SetMainCallback2(CB2_KuroM0Start);
+        SetMainCallback2(CB2_KuroBoot);
         return 0;
 #endif
 #if EXPANSION_INTRO == TRUE

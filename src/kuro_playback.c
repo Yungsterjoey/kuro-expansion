@@ -12,6 +12,7 @@
 #include "constants/battle_anim.h"
 #include "constants/songs.h"
 #include "constants/trainers.h"
+#include "kuro_link.h"
 #include "kuro_playback.h"
 #include "main.h"
 #include "move.h"
@@ -39,6 +40,8 @@ enum KuroOpcode
     KURO_OP_ABILITY_SHOW = 0x5A,
     KURO_OP_MESSAGE = 0x5F,
     KURO_OP_BATTLE_END = 0x61,
+    KURO_OP_ANIM_DONE = 0x30,
+    KURO_OP_ERR_DESYNC = 0xE0,
 };
 
 enum KuroActionKind
@@ -102,6 +105,11 @@ struct KuroPlayback
     u16 ackSeq;
     u16 framesSize;
     const u8 *frames;
+    bool8 isWire;
+    u16 lastSeq;
+    u8 pendingTxOpcode;
+    u16 pendingTxSeq;
+    u8 payload[KURO_MAX_PAYLOAD + 1];
     bool8 needsAck;
     bool8 battlerActive[MAX_BATTLERS_COUNT];
     u8 partyCount[NUM_BATTLE_SIDES];
@@ -126,8 +134,8 @@ static const struct KuroFixture sKuroFixtures[] =
     {sKuroM0FramesSwitches, sizeof(sKuroM0FramesSwitches)},
 };
 
-// Patched in a copy of the ROM by tools/regress/run.sh to choose the fixture.
-const volatile u8 gKuroM0FixtureIndex = 0;
+const volatile u8 gKuroBootMode = KURO_BOOT_FIXTURE_0;
+EWRAM_DATA volatile u32 gKuroLoopbackCorrupt = 0;
 
 static const u8 sText_Foe[] = _("Foe ");
 static const u8 sText_GoSpace[] = _("Go! ");
@@ -448,27 +456,74 @@ static bool32 IsFrameValid(u16 cursor, u16 *outLength)
     return TRUE;
 }
 
-// Returns FALSE when the stream is exhausted or corrupt.
+static void QueueTx(u8 opcode, u16 seq)
+{
+    sKuro.pendingTxOpcode = opcode;
+    sKuro.pendingTxSeq = seq;
+}
+
+// Returns TRUE when nothing is left waiting for room in the TX ring.
+static bool32 FlushPendingTx(void)
+{
+    u8 body[2];
+
+    if (sKuro.pendingTxOpcode == 0)
+        return TRUE;
+    body[0] = sKuro.pendingTxSeq & 0xFF;
+    body[1] = sKuro.pendingTxSeq >> 8;
+    if (!KuroLink_SendFrame(sKuro.pendingTxOpcode, body, sizeof(body)))
+        return FALSE;
+    sKuro.pendingTxOpcode = 0;
+    return TRUE;
+}
+
+static bool32 ReadFixtureFrame(u8 *opcode, u16 *length)
+{
+    u16 i;
+
+    if (sKuro.cursor >= sKuro.framesSize || !IsFrameValid(sKuro.cursor, length))
+    {
+        HaltWithError();
+        return FALSE;
+    }
+    *opcode = sKuro.frames[sKuro.cursor];
+    for (i = 0; i < *length; i++)
+        sKuro.payload[i] = sKuro.frames[sKuro.cursor + 3 + i];
+    sKuro.cursor += 3 + *length + 1;
+    return TRUE;
+}
+
+// Returns TRUE when a frame is ready. Corrupt frames ask the relay to resend.
+static bool32 ReadWireFrame(u8 *opcode, u16 *length)
+{
+    switch (KuroLink_ReadFrame(opcode, sKuro.payload, length))
+    {
+    case KURO_LINK_READ_OK:
+        return TRUE;
+    case KURO_LINK_READ_CORRUPT:
+        QueueTx(KURO_OP_ERR_DESYNC, sKuro.lastSeq);
+        return FALSE;
+    default:
+        return FALSE;
+    }
+}
+
+// Returns TRUE when a new event was queued.
 static bool32 FetchNextEvent(void)
 {
-    u16 length;
+    u16 length, seq;
     u8 opcode;
-    const u8 *payload;
+    const u8 *payload = sKuro.payload;
 
-    if (sKuro.cursor >= sKuro.framesSize)
-    {
-        HaltWithError();
+    if (!(sKuro.isWire ? ReadWireFrame(&opcode, &length) : ReadFixtureFrame(&opcode, &length)))
         return FALSE;
-    }
-    if (!IsFrameValid(sKuro.cursor, &length))
-    {
-        HaltWithError();
-        return FALSE;
-    }
 
-    opcode = sKuro.frames[sKuro.cursor];
-    payload = &sKuro.frames[sKuro.cursor + 3];
-    sKuro.cursor += 3 + length + 1;
+    seq = ReadU16(payload);
+    // After a reattach the relay resends from the last ack, so some frames were already played.
+    if (sKuro.isWire && (s16)(seq - sKuro.lastSeq) <= 0)
+        return FALSE;
+    sKuro.lastSeq = seq;
+
     sKuro.ackSeq = ReadU16(payload);
     sKuro.actionCount = 0;
     sKuro.actionIndex = 0;
@@ -498,7 +553,10 @@ static bool32 FetchNextEvent(void)
     case KURO_OP_MESSAGE: AddText(&payload[2]); break;
     case KURO_OP_BATTLE_END: QueueBattleEnd(payload); break;
     default:
-        HaltWithError();
+        if (sKuro.isWire)
+            QueueTx(KURO_OP_ERR_DESYNC, sKuro.lastSeq);
+        else
+            HaltWithError();
         return FALSE;
     }
     return TRUE;
@@ -633,6 +691,8 @@ void KuroPlayback_Main(void)
 {
     enum BattlerId battler = GetBattlerAtPosition(B_POSITION_PLAYER_LEFT);
 
+    KuroLink_Tick();
+
     switch (sKuro.state)
     {
     case KURO_STATE_INTRO:
@@ -651,8 +711,11 @@ void KuroPlayback_Main(void)
             {
                 gKuroAckSeq = sKuro.ackSeq;
                 sKuro.needsAck = FALSE;
+                if (sKuro.isWire)
+                    QueueTx(KURO_OP_ANIM_DONE, sKuro.ackSeq);
             }
-            FetchNextEvent();
+            if (FlushPendingTx())
+                FetchNextEvent();
         }
         else if (RunAction(&sKuro.actions[sKuro.actionIndex]))
         {
@@ -665,26 +728,71 @@ void KuroPlayback_Main(void)
     }
 }
 
-void CB2_KuroM0Start(void)
+// Echoes every frame unchanged, without interpreting it. Used only by the M1 bridge test.
+static void CB2_KuroLoopback(void)
 {
-    u32 fixture;
+    static EWRAM_DATA u8 sEcho[KURO_MAX_PAYLOAD + 1] = {0};
+    static EWRAM_DATA u8 sEchoOpcode = 0;
+    static EWRAM_DATA u16 sEchoLength = 0;
+    static EWRAM_DATA bool8 sEchoPending = FALSE;
 
+    KuroLink_Tick();
+    for (;;)
+    {
+        if (sEchoPending)
+        {
+            if (!KuroLink_SendFrame(sEchoOpcode, sEcho, sEchoLength))
+                return;
+            sEchoPending = FALSE;
+        }
+        switch (KuroLink_ReadFrame(&sEchoOpcode, sEcho, &sEchoLength))
+        {
+        case KURO_LINK_READ_OK:
+            sEchoPending = TRUE;
+            break;
+        case KURO_LINK_READ_CORRUPT:
+            gKuroLoopbackCorrupt++;
+            return;
+        default:
+            return;
+        }
+    }
+}
+
+static void StartBattlePlayback(u32 mode)
+{
     // Boot seeds the RNG from the RTC; fixed seeds keep presentation identical on every run.
     SeedRng(KURO_RNG_SEED);
     SeedRng2(KURO_RNG_SEED);
 
     memset(&sKuro, 0, sizeof(sKuro));
-    fixture = gKuroM0FixtureIndex;
-    if (fixture >= ARRAY_COUNT(sKuroFixtures))
-        fixture = 0;
-    sKuro.frames = sKuroFixtures[fixture].frames;
-    sKuro.framesSize = sKuroFixtures[fixture].size;
+    if (mode == KURO_BOOT_WIRE_PLAYBACK)
+    {
+        sKuro.isWire = TRUE;
+    }
+    else
+    {
+        sKuro.frames = sKuroFixtures[mode].frames;
+        sKuro.framesSize = sKuroFixtures[mode].size;
+    }
     gKuroAckSeq = 0;
     gKuroStatus = KURO_STATUS_RUNNING;
+    KuroLink_SetRomFlags(KURO_ROM_FLAG_BOOTED | KURO_ROM_FLAG_IN_BATTLE);
 
     ZeroPlayerPartyMons();
     ZeroEnemyPartyMons();
     gBattleTypeFlags = BATTLE_TYPE_TRAINER | BATTLE_TYPE_KURO_REMOTE;
     TRAINER_BATTLE_PARAM.opponentA = TRAINER_NONE;
     SetMainCallback2(CB2_InitBattle);
+}
+
+void CB2_KuroBoot(void)
+{
+    u32 mode = gKuroBootMode;
+
+    KuroLink_Init();
+    if (mode == KURO_BOOT_LOOPBACK)
+        SetMainCallback2(CB2_KuroLoopback);
+    else
+        StartBattlePlayback(mode <= KURO_BOOT_WIRE_PLAYBACK ? mode : KURO_BOOT_FIXTURE_0);
 }

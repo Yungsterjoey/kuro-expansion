@@ -18,6 +18,7 @@ SECTIONS {
     ALIGN(4)
     {
         __ewram_start = .;
+        *(.kurolink) /* KURO: 4 KB mailbox, first so it stays page aligned at no cost */
         *(.ewram*)
         . = ALIGN(4);
         __ewram_end = .;
