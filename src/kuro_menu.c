@@ -56,6 +56,7 @@ static EWRAM_DATA u8 sLastSearchState = 0;
 static EWRAM_DATA u8 sLastBridgeFlags = 0;
 static EWRAM_DATA u8 sPayload[KURO_MAX_PAYLOAD + 1] = {0};
 static EWRAM_DATA u8 sShownPopup[120] = {0};
+static EWRAM_DATA u16 sSearchFrames = 0;
 
 EWRAM_DATA volatile u8 gKuroUiScreen = 0;
 
@@ -73,6 +74,7 @@ static const u8 sText_NoFormats[] = _("Waiting for the format list…");
 static const u8 sText_Searching[] = _("Searching for a battle…");
 static const u8 sText_PressBToCancel[] = _("Press B to cancel.");
 static const u8 sText_Cursor[] = _("{RIGHT_ARROW} ");
+static const u8 sText_Colon[] = _(":");
 
 static void VBlankCB_KuroMenu(void)
 {
@@ -143,7 +145,11 @@ static void DrawScreen(void)
         break;
     case SCREEN_SEARCHING:
         PrintLine(sText_Searching, 0);
-        PrintLine(sText_PressBToCancel, LINE_HEIGHT * 2);
+        ConvertIntToDecimalStringN(buffer, sSearchFrames / 3600, STR_CONV_MODE_LEFT_ALIGN, 2);
+        StringAppend(buffer, sText_Colon);
+        ConvertIntToDecimalStringN(buffer + StringLength(buffer), (sSearchFrames / 60) % 60, STR_CONV_MODE_LEADING_ZEROS, 2);
+        PrintLine(buffer, LINE_HEIGHT);
+        PrintLine(sText_PressBToCancel, LINE_HEIGHT * 3);
         if (sShownPopup[0] != EOS)
             PrintLine(sShownPopup, LINE_HEIGHT * 4);
         break;
@@ -229,6 +235,7 @@ static void HandleInput(void)
             {
                 PlaySE(SE_SELECT);
                 sShownPopup[0] = EOS;
+                sSearchFrames = 0;
                 SetScreen(SCREEN_SEARCHING);
             }
         }
@@ -265,6 +272,9 @@ static void CB2_KuroMenu(void)
         sLastBridgeFlags = gKuroLink.bridgeFlags;
         sDirty = TRUE;
     }
+
+    if (sScreen == SCREEN_SEARCHING && ++sSearchFrames % 60 == 0)
+        sDirty = TRUE;
 
     UpdateConnection();
     if (!gPaletteFade.active)

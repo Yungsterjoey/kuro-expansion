@@ -47,6 +47,22 @@ void KuroLink_SetRomFlags(u8 flags)
     gKuroLink.romFlags = flags;
 }
 
+s32 KuroLink_PeekOpcode(void)
+{
+    u16 head = gKuroLink.rxHead;
+    u16 tail = gKuroLink.rxTail;
+    u16 used = RingUsed(head, tail, KURO_RX_RING_SIZE);
+    u16 frameLength;
+
+    if (used < FRAME_HEADER_SIZE)
+        return -1;
+    frameLength = RingPeek(gKuroLink.rx, tail, KURO_RX_RING_SIZE, 1)
+                | (RingPeek(gKuroLink.rx, tail, KURO_RX_RING_SIZE, 2) << 8);
+    if (used < FRAME_HEADER_SIZE + frameLength + FRAME_CHECKSUM_SIZE)
+        return -1;
+    return RingPeek(gKuroLink.rx, tail, KURO_RX_RING_SIZE, 0);
+}
+
 enum KuroLinkRead KuroLink_ReadFrame(u8 *opcode, u8 *payload, u16 *length)
 {
     u16 head = gKuroLink.rxHead;

@@ -99,7 +99,11 @@ enum KuroState
 #define SWITCH_IN_NICKNAME_OFFSET 14
 #define KURO_REQUEST_FORCE_SWITCH (1 << 0)
 #define KURO_REQUEST_TRAPPED (1 << 1)
+#define KURO_REQUEST_CAN_TERA (1 << 2)
 #define KURO_REQUEST_WAIT (1 << 3)
+#define KURO_TIMER_WARNING_SECONDS 30
+#define KURO_FRAMES_PER_SECOND 60
+#define KURO_CHOOSE_FLAG_TERA 1
 #define REQUEST_FLAGS 2
 #define REQUEST_MOVES 4
 #define REQUEST_MOVE_SIZE 6
@@ -141,6 +145,12 @@ struct KuroPlayback
     u8 pendingTxBody[4];
     u8 payload[KURO_MAX_PAYLOAD + 1];
     bool8 isClient;
+    bool8 teraSelected;
+    bool8 hudShown;
+    u16 timerSeconds;
+    bool8 timerOn;
+    u8 timerFrames;
+    u8 hudText[24];
     bool8 resyncing;
     bool8 onFieldBeforeResync[MAX_BATTLERS_COUNT];
     bool8 hasStash;
@@ -188,6 +198,7 @@ static const u8 sText_Foe[] = _("Foe ");
 static const u8 sText_GoSpace[] = _("Go! ");
 static const u8 sText_SentOut[] = _(" sent out\n");
 static const u8 sText_Exclaim[] = _("!");
+static const u8 sText_WantsToBattle[] = _("\nwants to battle!");
 static const u8 sText_Used[] = _(" used\n");
 static const u8 sText_Fainted[] = _("\nfainted!");
 static const u8 sText_Crit[] = _("A critical hit!");
@@ -647,6 +658,13 @@ static bool32 ReadWireFrame(u8 *opcode, u16 *length)
     }
 }
 
+static void ApplyTimerInfo(const u8 *payload)
+{
+    sKuro.timerSeconds = ReadU16(&payload[2]);
+    sKuro.timerOn = payload[4];
+    sKuro.timerFrames = 0;
+}
+
 // Returns TRUE when a new event was queued.
 static bool32 FetchNextEvent(void)
 {
@@ -689,6 +707,15 @@ static bool32 FetchNextEvent(void)
     switch (opcode)
     {
     case KURO_OP_BATTLE_START:
+        if (sKuro.isClient)
+        {
+            u8 *text = NextTextBuffer();
+
+            StringCopyN(text, &payload[5], sizeof(sKuro.opponentName) - 1);
+            text[sizeof(sKuro.opponentName) - 1] = EOS;
+            StringAppend(text, sText_WantsToBattle);
+            AddText(text);
+        }
         StringCopyN(sKuro.opponentName, &payload[5], sizeof(sKuro.opponentName) - 1);
         sKuro.opponentName[sizeof(sKuro.opponentName) - 1] = EOS;
         break;
@@ -701,6 +728,7 @@ static bool32 FetchNextEvent(void)
         sKuro.requestAnswered = FALSE;
         break;
     case KURO_OP_TIMER_INFO:
+        ApplyTimerInfo(payload);
         break;
     case KURO_OP_SWITCH_IN: QueueSwitchIn(payload, length); break;
     case KURO_OP_MOVE: QueueMove(payload); break;
@@ -855,6 +883,8 @@ static const u8 sText_WaitingForOpponent[] = _("Waiting for opponent…");
 static const u8 sText_Forfeit[] = _("Forfeit this battle?");
 static const u8 sText_CantSwitch[] = _("You can't switch out now!");
 static const u8 sText_NoPP[] = _("That move can't be used!");
+static const u8 sText_Seconds[] = _("s ");
+static const u8 sText_Tera[] = _("Tera");
 
 static void ShowBattleText(const u8 *text)
 {
@@ -978,6 +1008,7 @@ static void OpenDecision(void)
 {
     sKuro.sawTurn = FALSE;
     sKuro.reopen = FALSE;
+    sKuro.teraSelected = FALSE;
     KuroLink_SetRomFlags(KURO_ROM_FLAG_BOOTED | KURO_ROM_FLAG_IN_BATTLE | KURO_ROM_FLAG_AWAITING_CHOICE);
     ApplyRequestParty();
     if (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_FORCE_SWITCH)
@@ -1058,7 +1089,7 @@ static void RunDecision(void)
             body[0] = 0;
             body[1] = cursor + 1;
             body[2] = 0;
-            body[3] = 0;
+            body[3] = sKuro.teraSelected ? KURO_CHOOSE_FLAG_TERA : 0;
             SendChoice(KURO_OP_CHOOSE_MOVE, body, 4);
         }
         break;
@@ -1088,6 +1119,66 @@ static void RunDecision(void)
     }
 }
 
+static void HideHud(void)
+{
+    if (!sKuro.hudShown)
+        return;
+    sKuro.hudShown = FALSE;
+    ClearWindowTilemap(B_WIN_LEVEL_UP_BANNER);
+    CopyBgTilemapBufferToVram(2);
+}
+
+// Timer and Tera indicators. They only show while the player is deciding.
+static void UpdateHud(void)
+{
+    u8 *end = sKuro.hudText;
+    bool32 flashOff;
+
+    if (sKuro.timerOn && sKuro.timerSeconds > 0 && ++sKuro.timerFrames >= KURO_FRAMES_PER_SECOND)
+    {
+        sKuro.timerFrames = 0;
+        sKuro.timerSeconds--;
+    }
+
+    flashOff = sKuro.timerOn && sKuro.timerSeconds < KURO_TIMER_WARNING_SECONDS && sKuro.timerFrames >= KURO_FRAMES_PER_SECOND / 2;
+    if (sKuro.timerOn && !flashOff)
+    {
+        end = ConvertIntToDecimalStringN(end, sKuro.timerSeconds, STR_CONV_MODE_LEFT_ALIGN, 3);
+        end = StringCopy(end, sText_Seconds);
+    }
+    if (sKuro.teraSelected)
+        end = StringCopy(end, sText_Tera);
+    *end = EOS;
+
+    if (sKuro.hudText[0] == EOS)
+    {
+        HideHud();
+        return;
+    }
+    if (sKuro.timerFrames == 0 || flashOff || !sKuro.hudShown)
+    {
+        BattlePutTextOnWindow(sKuro.hudText, B_WIN_LEVEL_UP_BANNER);
+        sKuro.hudShown = TRUE;
+    }
+}
+
+static void RunMenuExtras(void)
+{
+    u8 opcode;
+    u16 length;
+
+    if (KuroLink_PeekOpcode() == KURO_OP_TIMER_INFO && KuroLink_ReadFrame(&opcode, sKuro.payload, &length) == KURO_LINK_READ_OK)
+        ApplyTimerInfo(sKuro.payload);
+
+    if (sKuro.phase == KURO_UI_MOVE && JOY_NEW(SELECT_BUTTON) && (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_CAN_TERA))
+    {
+        sKuro.teraSelected = !sKuro.teraSelected;
+        PlaySE(SE_SELECT);
+        sKuro.hudShown = FALSE;
+    }
+    UpdateHud();
+}
+
 static bool32 IsMenuOpen(void)
 {
     return sKuro.phase != KURO_UI_NONE && sKuro.phase != KURO_UI_WAITING;
@@ -1108,9 +1199,11 @@ static void RunIdle(void)
 
     if (IsMenuOpen())
     {
+        RunMenuExtras();
         RunDecision();
         return;
     }
+    HideHud();
 
     if (sKuro.phase == KURO_UI_WAITING && JOY_NEW(B_BUTTON))
     {

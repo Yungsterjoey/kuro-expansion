@@ -42,6 +42,8 @@ void KuroLink_Tick(void);
 void KuroLink_SetRomFlags(u8 flags);
 // Reads one whole frame. A corrupt frame empties the RX ring, since its boundary is lost.
 enum KuroLinkRead KuroLink_ReadFrame(u8 *opcode, u8 *payload, u16 *length);
+// Returns the opcode of the next whole frame, or -1 if none is ready.
+s32 KuroLink_PeekOpcode(void);
 // Returns FALSE when the TX ring is full; the caller retries next frame and must not drop it.
 bool32 KuroLink_SendFrame(u8 opcode, const u8 *payload, u16 length);
 
