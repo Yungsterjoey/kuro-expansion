@@ -5,6 +5,7 @@
 #include "gpu_regs.h"
 #include "kuro_account.h"
 #include "kuro_builder.h"
+#include "kuro_chat.h"
 #include "kuro_keyboard.h"
 #include "kuro_link.h"
 #include "kuro_playback.h"
@@ -40,6 +41,7 @@ enum KuroMenuScreen
     SCREEN_RESULT,
     SCREEN_ACCOUNT,
     SCREEN_KEYBOARD_TEST,
+    SCREEN_CHAT,
 };
 
 #define WINDOW_MAIN 0
@@ -50,7 +52,8 @@ enum KuroMenuScreen
 
 static const struct BgTemplate sBgTemplates[] =
 {
-    {.bg = 0, .charBaseIndex = 2, .mapBaseIndex = 31, .screenSize = 0, .paletteMode = 0, .priority = 0, .baseTile = 0},
+    {.bg = 0, .charBaseIndex = 2, .mapBaseIndex = 31, .screenSize = 0, .paletteMode = 0, .priority = 1, .baseTile = 0},
+    {.bg = 1, .charBaseIndex = 2, .mapBaseIndex = 30, .screenSize = 0, .paletteMode = 0, .priority = 0, .baseTile = 0}, // The banner, above everything.
 };
 
 static const struct WindowTemplate sWindowTemplates[] =
@@ -89,6 +92,7 @@ static EWRAM_DATA bool8 sIconsUp = FALSE;
 static EWRAM_DATA u8 sKeyboardText[KURO_KEYBOARD_MAX_LENGTH + 1] = {0};
 
 static EWRAM_DATA u32 sLastLoopVblank = 0;
+static EWRAM_DATA u32 sChatLoopVblank = 0;
 
 EWRAM_DATA volatile u8 gKuroUiScreen = 0;
 // The most frames one trip round the menu loop took with the keyboard open. Read by tools/regress.
@@ -103,13 +107,17 @@ static const u8 sText_RomLabel[] = _("ROM: ");
 static const u8 sText_RelayLabel[] = _("\nRelay: ");
 static const u8 sText_SignedInAs[] = _("Signed in as ");
 static const u8 sText_FindBattle[] = _("Find Battle");
+static const u8 sText_Lobby[] = _("Lobby");
 static const u8 sText_TeamBuilder[] = _("Team Builder");
-static const u8 sText_Account[] = _("Account");
+static const u8 sText_Pms[] = _("Private Messages");
+static const u8 sText_Options[] = _("Options");
 static const u8 sText_GuestSearch[] = _("Sign in to search for a battle.");
 static const u8 sText_GuestAs[] = _("Playing as guest ");
 static const u8 sText_KeyboardTest[] = _("Keyboard test");
 static const u8 sText_KeyboardSent[] = _("Sent:\n");
-static const u8 *const sMainRows[] = {sText_FindBattle, sText_TeamBuilder, sText_Account};
+static const u8 *const sMainRows[] = {sText_FindBattle, sText_Lobby, sText_TeamBuilder, sText_Pms, sText_Options};
+enum MainRow { MAIN_FIND, MAIN_LOBBY, MAIN_TEAMS, MAIN_PMS, MAIN_OPTIONS };
+static const u8 sText_GuestChat[] = _("Sign in to chat.");
 static const u8 sText_ChooseTeam[] = _("Choose a team");
 static const u8 sText_NoTeams[] = _("No teams yet. Build one first.");
 static const u8 sText_PressAToContinue[] = _("Press A to continue.");
@@ -196,9 +204,15 @@ static void DrawScreen(void)
             StringAppend(buffer, sMainRows[i]);
             PrintLine(buffer, LINE_HEIGHT * (i + 2));
         }
+        KuroChat_DrawHubLine(buffer);
+        PrintLine(buffer, LINE_HEIGHT);
         if (sShownPopup[0] != EOS)
-            PrintLine(sShownPopup, LINE_HEIGHT * 6);
+            PrintLine(sShownPopup, LINE_HEIGHT * 7);
         break;
+    case SCREEN_CHAT:
+        KuroChat_Draw(WINDOW_MAIN);
+        CopyWindowToVram(WINDOW_MAIN, COPYWIN_FULL);
+        return;
     case SCREEN_ACCOUNT:
         KuroAccount_Draw(WINDOW_MAIN);
         CopyWindowToVram(WINDOW_MAIN, COPYWIN_FULL);
@@ -311,6 +325,26 @@ static void DrawScreen(void)
     gKuroUiScreen = sScreen + KURO_UI_MENU_BASE;
 }
 
+void KuroMenu_RequestDraw(void)
+{
+    sDirty = TRUE;
+}
+
+void KuroMenu_ShowMainLayout(void)
+{
+    FillBgTilemapBufferRect_Palette0(0, 0, 0, 0, 32, 32);
+    PutWindowTilemap(WINDOW_MAIN);
+    DrawStdFrameWithCustomTileAndPalette(WINDOW_MAIN, FALSE, BORDER_BASE_TILE, BORDER_PALETTE);
+    CopyBgTilemapBufferToVram(0);
+    sDirty = TRUE;
+}
+
+void KuroMenu_HideMainLayout(void)
+{
+    FillBgTilemapBufferRect_Palette0(0, 0, 0, 0, 32, 32);
+    CopyBgTilemapBufferToVram(0);
+}
+
 static void SetScreen(u8 screen)
 {
     sScreen = screen;
@@ -346,6 +380,8 @@ static void UpdateConnection(void)
     {
         if (sScreen == SCREEN_ACCOUNT)
             KuroAccount_Abort();
+        if (sScreen == SCREEN_CHAT)
+            KuroChat_Close();
         SetScreen(SCREEN_CONNECTING);
     }
 }
@@ -665,6 +701,20 @@ static void UpdateTeamVerdict(void)
     }
 }
 
+// A banner's L opens the PM behind it, on the screens that leave L free.
+static void HandleBannerKey(void)
+{
+    if (!JOY_NEW(L_BUTTON) || !KuroChat_BannerVisible() || KuroKeyboard_IsOpen())
+        return;
+    if (sScreen != SCREEN_MAIN && sScreen != SCREEN_FORMATS && sScreen != SCREEN_CHAT)
+        return;
+    if (KuroChat_OpenLatestPm())
+    {
+        PlaySE(SE_SELECT);
+        sScreen = SCREEN_CHAT;
+    }
+}
+
 static void HandleInput(void)
 {
     switch (sScreen)
@@ -679,8 +729,9 @@ static void HandleInput(void)
         {
             PlaySE(SE_SELECT);
             sShownPopup[0] = EOS;
-            if (sCursor == 0)
+            switch (sCursor)
             {
+            case MAIN_FIND:
                 // Poka-yoke: a guest gets the reason here instead of a refusal from the relay.
                 if (gKuroSession.status == KURO_RELAY_GUEST)
                 {
@@ -691,15 +742,30 @@ static void HandleInput(void)
                 {
                     SetScreen(SCREEN_FORMATS);
                 }
-            }
-            else if (sCursor == 1)
-            {
+                break;
+            case MAIN_LOBBY:
+            case MAIN_PMS:
+                if (gKuroSession.status == KURO_RELAY_GUEST)
+                {
+                    StringCopy(sShownPopup, sText_GuestChat);
+                    sDirty = TRUE;
+                }
+                else
+                {
+                    u8 row = sCursor;
+
+                    SetScreen(SCREEN_CHAT);
+                    KuroChat_Open(row == MAIN_LOBBY ? KURO_CHAT_ENTRY_LOBBY : KURO_CHAT_ENTRY_PMS);
+                }
+                break;
+            case MAIN_TEAMS:
                 KuroBuilder_Open();
                 SetScreen(SCREEN_BUILDER);
-            }
-            else
-            {
-                OpenAccount(KURO_ACCOUNT_MENU);
+                break;
+            case MAIN_OPTIONS:
+                SetScreen(SCREEN_CHAT);
+                KuroChat_Open(KURO_CHAT_ENTRY_OPTIONS);
+                break;
             }
         }
         break;
@@ -723,6 +789,19 @@ static void HandleInput(void)
             sDirty = TRUE;
         break;
     }
+    case SCREEN_CHAT:
+        switch (KuroChat_Update())
+        {
+        case KURO_CHAT_EXIT_HUB:
+            SetScreen(SCREEN_MAIN);
+            break;
+        case KURO_CHAT_EXIT_ACCOUNT:
+            OpenAccount(KURO_ACCOUNT_MENU);
+            break;
+        default:
+            break;
+        }
+        break;
     case SCREEN_BUILDER:
         if (KuroBuilder_HandleInput())
             SetScreen(SCREEN_MAIN);
@@ -814,13 +893,29 @@ static void CB2_KuroMenu(void)
     UpdateConnection();
     UpdateTeamVerdict();
     if (!gPaletteFade.active)
+    {
+        HandleBannerKey();
         HandleInput();
+    }
     if (sScreen == SCREEN_BUILDER && KuroBuilder_Tick())
         sDirty = TRUE;
     if (sDirty)
     {
         sDirty = FALSE;
         DrawScreen();
+    }
+    if (sScreen == SCREEN_CHAT)
+        KuroChat_Render();
+    KuroChat_BannerTick();
+    if (sScreen == SCREEN_CHAT && !KuroKeyboard_IsOpen())
+    {
+        if (gMain.vblankCounter1 - sChatLoopVblank > gKuroChatFrameGap && sChatLoopVblank != 0)
+            gKuroChatFrameGap = gMain.vblankCounter1 - sChatLoopVblank;
+        sChatLoopVblank = gMain.vblankCounter1;
+    }
+    else
+    {
+        sChatLoopVblank = 0;
     }
 
     RunTasks();
@@ -859,9 +954,11 @@ void CB2_KuroMenuStart(void)
     CopyBgTilemapBufferToVram(0);
 
     SetGpuReg(REG_OFFSET_BLDCNT, 0);
-    SetGpuReg(REG_OFFSET_DISPCNT, DISPCNT_MODE_0 | DISPCNT_OBJ_1D_MAP | DISPCNT_OBJ_ON | DISPCNT_BG0_ON);
+    SetGpuReg(REG_OFFSET_DISPCNT, DISPCNT_MODE_0 | DISPCNT_OBJ_1D_MAP | DISPCNT_OBJ_ON | DISPCNT_BG0_ON | DISPCNT_BG1_ON);
     ShowBg(0);
+    ShowBg(1);
 
+    KuroChat_MenuActive(TRUE);
     BeginNormalPaletteFade(PALETTES_ALL, 0, 16, 0, RGB_BLACK);
     SetVBlankCallback(VBlankCB_KuroMenu);
 

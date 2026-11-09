@@ -1,16 +1,18 @@
 #include "global.h"
 #include "constants/characters.h"
 #include "kuro_build_info.h"
+#include "kuro_chat.h"
 #include "kuro_link.h"
 #include "kuro_playback.h"
 #include "kuro_session.h"
 #include "kuro_teams.h"
 #include "string_util.h"
 
-#define KURO_PROTOCOL_MINOR 1
+#define KURO_PROTOCOL_MINOR 2
 #define KURO_FEATURE_TERA (1 << 1)
 #define KURO_FEATURE_TEAM_IMPORT (1 << 5)
 #define KURO_FEATURE_ACCOUNTS (1 << 6)
+#define KURO_FEATURE_SOCIAL (1 << 7)
 #define CAPABILITY_FIXED_SIZE 18
 
 EWRAM_DATA struct KuroSession gKuroSession = {0};
@@ -31,7 +33,7 @@ void KuroSession_Reset(void)
 static u16 BuildCapabilityBlock(u8 *out)
 {
     u32 crc = KURO_IDMAP_CRC;
-    u32 features = KURO_FEATURE_TERA | KURO_FEATURE_TEAM_IMPORT | KURO_FEATURE_ACCOUNTS;
+    u32 features = KURO_FEATURE_TERA | KURO_FEATURE_TEAM_IMPORT | KURO_FEATURE_ACCOUNTS | KURO_FEATURE_SOCIAL;
     u16 i, length = 0;
 
     out[length++] = KURO_PROTOCOL_MAJOR;
@@ -212,6 +214,7 @@ void KuroSession_HandleFrame(u8 opcode, const u8 *payload, u16 length)
         HandleAvatarList(payload, length);
         break;
     default:
+        KuroChat_HandleFrame(opcode, payload, length);
         break;
     }
 }

@@ -12,6 +12,8 @@
 #include "constants/battle_anim.h"
 #include "constants/songs.h"
 #include "constants/trainers.h"
+#include "kuro_chat.h"
+#include "menu.h"
 #include "kuro_link.h"
 #include "kuro_session.h"
 #include "party_menu.h"
@@ -150,6 +152,14 @@ struct KuroPlayback
     bool8 isClient;
     bool8 teraSelected;
     bool8 hudShown;
+    u8 overlay;
+    u8 overlayIndex;
+    u8 overlaySavedUi;
+    u16 overlaySavedBg0Y;
+    u16 selectHeld;
+    u16 bubbleFrames;
+    u8 logPage;
+    u8 overlayText[100];
     u16 timerSeconds;
     bool8 timerOn;
     u8 timerFrames;
@@ -797,7 +807,7 @@ static bool32 FetchNextEvent(void)
     case KURO_OP_ABILITY_SHOW:
         AddAction(KURO_ACT_ABILITY_POPUP, BattlerFromPosition(payload[2]), ReadU16(&payload[3]));
         break;
-    case KURO_OP_MESSAGE: AddText(&payload[2]); break;
+    case KURO_OP_MESSAGE: AddText(&payload[2]); KuroChat_LogAdd(&payload[2]); break;
     case KURO_OP_TEAM_PREVIEW: break; // A resync replays it; the preview itself runs before the battle scene.
     case KURO_OP_BATTLE_END: QueueBattleEnd(payload, length); break;
     default:
@@ -1368,13 +1378,6 @@ static void RunMenuExtras(void)
         PlaySE(SE_SELECT);
         sKuro.hudShown = FALSE;
     }
-    if (sKuro.phase == KURO_UI_ACTION && JOY_NEW(START_BUTTON))
-    {
-        u8 enable = !sKuro.timerOn;
-
-        QueueTxBody(KURO_OP_TIMER, &enable, 1);
-        PlaySE(SE_SELECT);
-    }
     UpdateHud();
 }
 
@@ -1391,9 +1394,311 @@ static bool32 IsDecisionReady(void)
         && (sKuro.sawTurn || sKuro.reopen || (sKuro.request[REQUEST_FLAGS] & KURO_REQUEST_FORCE_SWITCH));
 }
 
+enum BattleOverlay
+{
+    OVERLAY_NONE,
+    OVERLAY_QUICK,
+    OVERLAY_MENU,
+    OVERLAY_LOG,
+};
+
+enum BattleMenuRow
+{
+    BATTLE_MENU_TIMER,
+    BATTLE_MENU_LOG,
+    BATTLE_MENU_MUTE,
+    BATTLE_MENU_BACK,
+    BATTLE_MENU_COUNT,
+};
+
+#define SELECT_HOLD_FRAMES 30
+#define BUBBLE_WINDOW B_WIN_LEVEL_UP_BOX
+#define BUBBLE_WIDTH_TILES 16
+#define BUBBLE_HEIGHT_TILES 4
+#define BUBBLE_DISPLAY_FRAMES 180
+
+static const u8 sText_QuickPrefix[] = _("Quick chat:  < ");
+static const u8 sText_QuickSuffix[] = _(" >\nA send   B back   {RIGHT_ARROW} next");
+static const u8 sText_BattleMenuTimer[] = _("Timer: ");
+static const u8 sText_TimerOn[] = _("on");
+static const u8 sText_TimerOff[] = _("off");
+static const u8 sText_MenuHelp[] = _("\nA select  B back  UP/DOWN");
+static const u8 sText_BattleMenuLog[] = _("Battle log");
+static const u8 sText_BattleMenuMute[] = _("Mute opponent chat: ");
+static const u8 sText_BattleMenuBack[] = _("Back to the battle");
+static const u8 sText_LogEmpty[] = _("Nothing in the log yet.");
+
+static void OverlayShowText(const u8 *text)
+{
+    gBattle_BG0_X = 0;
+    gBattle_BG0_Y = 0;
+    if (text != sKuro.overlayText)
+        StringCopyN(sKuro.overlayText, text, sizeof(sKuro.overlayText) - 1);
+    sKuro.overlayText[sizeof(sKuro.overlayText) - 1] = EOS;
+    BattlePutTextOnWindow(sKuro.overlayText, B_WIN_MSG);
+}
+
+static void OverlayOpen(u32 overlay)
+{
+    sKuro.overlay = overlay;
+    sKuro.overlayIndex = 0;
+    sKuro.overlaySavedUi = gKuroUiScreen;
+    sKuro.overlaySavedBg0Y = gBattle_BG0_Y;
+    PlaySE(SE_SELECT);
+}
+
+static void OverlayClose(void)
+{
+    sKuro.overlay = OVERLAY_NONE;
+    gBattle_BG0_Y = sKuro.overlaySavedBg0Y;
+    gKuroUiScreen = sKuro.overlaySavedUi;
+    PlaySE(SE_SELECT);
+    if (sKuro.phase == KURO_UI_NONE || sKuro.phase == KURO_UI_WAITING)
+        BattlePutTextOnWindow(gDisplayedStringBattle, B_WIN_MSG);
+}
+
+static void DrawQuickOverlay(void)
+{
+    u8 *end = StringCopy(sKuro.overlayText, sText_QuickPrefix);
+
+    end = StringCopy(end, gKuroQuickChat[sKuro.overlayIndex]);
+    StringCopy(end, sText_QuickSuffix);
+    OverlayShowText(sKuro.overlayText);
+    gKuroUiScreen = KURO_UI_BATTLE_QUICK;
+}
+
+static void DrawMenuOverlay(void)
+{
+    u8 *end = sKuro.overlayText;
+
+    switch (sKuro.overlayIndex)
+    {
+    case BATTLE_MENU_TIMER:
+        end = StringCopy(end, sText_BattleMenuTimer);
+        end = StringCopy(end, sKuro.timerOn ? sText_TimerOn : sText_TimerOff);
+        break;
+    case BATTLE_MENU_LOG:
+        end = StringCopy(end, sText_BattleMenuLog);
+        break;
+    case BATTLE_MENU_MUTE:
+        end = StringCopy(end, sText_BattleMenuMute);
+        end = StringCopy(end, KuroChat_BattleLineMuted() ? sText_TimerOn : sText_TimerOff);
+        break;
+    default:
+        end = StringCopy(end, sText_BattleMenuBack);
+        break;
+    }
+    StringCopy(end, sText_MenuHelp);
+    OverlayShowText(sKuro.overlayText);
+    gKuroUiScreen = KURO_UI_BATTLE_MENU;
+}
+
+static void DrawLogOverlay(void)
+{
+    u32 count = KuroChat_LogCount();
+
+    if (count == 0)
+        OverlayShowText(sText_LogEmpty);
+    else
+        OverlayShowText(KuroChat_LogLine(min(sKuro.logPage, count - 1)));
+    gKuroUiScreen = KURO_UI_BATTLE_LOG;
+}
+
+static void RunQuickOverlay(void)
+{
+    if (JOY_NEW(B_BUTTON))
+    {
+        OverlayClose();
+    }
+    else if (JOY_NEW(DPAD_LEFT) || JOY_NEW(DPAD_UP))
+    {
+        sKuro.overlayIndex = (sKuro.overlayIndex + KURO_QUICK_PHRASES - 1) % KURO_QUICK_PHRASES;
+        PlaySE(SE_SELECT);
+        DrawQuickOverlay();
+    }
+    else if (JOY_NEW(DPAD_RIGHT) || JOY_NEW(DPAD_DOWN))
+    {
+        sKuro.overlayIndex = (sKuro.overlayIndex + 1) % KURO_QUICK_PHRASES;
+        PlaySE(SE_SELECT);
+        DrawQuickOverlay();
+    }
+    else if (JOY_NEW(A_BUTTON))
+    {
+        const u8 *phrase = gKuroQuickChat[sKuro.overlayIndex];
+
+        QueueTxBody(KURO_OP_BATTLE_CHAT, phrase, StringLength(phrase) + 1);
+        OverlayClose();
+    }
+}
+
+static void RunMenuOverlay(void)
+{
+    if (JOY_NEW(B_BUTTON))
+    {
+        OverlayClose();
+    }
+    else if (JOY_NEW(DPAD_UP))
+    {
+        sKuro.overlayIndex = (sKuro.overlayIndex + BATTLE_MENU_COUNT - 1) % BATTLE_MENU_COUNT;
+        PlaySE(SE_SELECT);
+        DrawMenuOverlay();
+    }
+    else if (JOY_NEW(DPAD_DOWN))
+    {
+        sKuro.overlayIndex = (sKuro.overlayIndex + 1) % BATTLE_MENU_COUNT;
+        PlaySE(SE_SELECT);
+        DrawMenuOverlay();
+    }
+    else if (JOY_NEW(A_BUTTON))
+    {
+        switch (sKuro.overlayIndex)
+        {
+        case BATTLE_MENU_TIMER:
+        {
+            u8 enable = !sKuro.timerOn;
+
+            QueueTxBody(KURO_OP_TIMER, &enable, 1);
+            OverlayClose();
+            break;
+        }
+        case BATTLE_MENU_LOG:
+            sKuro.overlay = OVERLAY_LOG;
+            sKuro.logPage = KuroChat_LogCount() > 0 ? KuroChat_LogCount() - 1 : 0;
+            DrawLogOverlay();
+            PlaySE(SE_SELECT);
+            break;
+        case BATTLE_MENU_MUTE:
+            KuroChat_MuteBattle(!KuroChat_BattleLineMuted());
+            PlaySE(SE_SELECT);
+            DrawMenuOverlay();
+            break;
+        default:
+            OverlayClose();
+            break;
+        }
+    }
+}
+
+static void RunLogOverlay(void)
+{
+    u32 count = KuroChat_LogCount();
+
+    if (JOY_NEW(B_BUTTON) || JOY_NEW(A_BUTTON))
+    {
+        OverlayClose();
+        return;
+    }
+    if (count > 0 && JOY_NEW(DPAD_UP) && sKuro.logPage > 0)
+    {
+        sKuro.logPage--;
+        PlaySE(SE_SELECT);
+        DrawLogOverlay();
+    }
+    else if (count > 0 && JOY_NEW(DPAD_DOWN) && sKuro.logPage + 1 < count)
+    {
+        sKuro.logPage++;
+        PlaySE(SE_SELECT);
+        DrawLogOverlay();
+    }
+}
+
+static void HideBubble(void)
+{
+    ClearWindowTilemap(BUBBLE_WINDOW);
+    CopyBgTilemapBufferToVram(1);
+}
+
+static void ShowBubble(const u8 *text)
+{
+    static const u8 sBubbleColors[3] = {TEXT_COLOR_TRANSPARENT, TEXT_COLOR_DARK_GRAY, TEXT_COLOR_LIGHT_GRAY};
+    struct WindowTemplate *window = &gWindows[BUBBLE_WINDOW].window;
+
+    // The level-up box is never used in puppet mode; its tiles and tilemap slot are free.
+    window->tilemapLeft = 1;
+    window->tilemapTop = 0;
+    window->width = BUBBLE_WIDTH_TILES;
+    window->height = BUBBLE_HEIGHT_TILES;
+    FillWindowPixelBuffer(BUBBLE_WINDOW, PIXEL_FILL(TEXT_COLOR_WHITE));
+    AddTextPrinterParameterized4(BUBBLE_WINDOW, FONT_NARROW, 2, 1, 0, -2, sBubbleColors, TEXT_SKIP_DRAW, text);
+    PutWindowTilemap(BUBBLE_WINDOW);
+    CopyWindowToVram(BUBBLE_WINDOW, COPYWIN_FULL);
+    CopyBgTilemapBufferToVram(1);
+}
+
+// The speech bubble has its own 3-second clock, in frames, so it needs no real-time source.
+static void UpdateBattleBubble(void)
+{
+    if (KuroChat_TakeBattleBubble() && sKuro.isClient)
+    {
+        ShowBubble(KuroChat_BubbleText());
+        sKuro.bubbleFrames = BUBBLE_DISPLAY_FRAMES;
+    }
+    else if (sKuro.bubbleFrames > 0 && --sKuro.bubbleFrames == 0)
+    {
+        HideBubble();
+    }
+}
+
+// Returns TRUE while an overlay owns the input. Runs before the battle controllers.
+static bool32 RunBattleOverlay(void)
+{
+    bool32 chatAllowed = sKuro.isClient && (sKuro.phase == KURO_UI_ACTION || sKuro.phase == KURO_UI_NONE || sKuro.phase == KURO_UI_WAITING);
+
+    if (sKuro.overlay == OVERLAY_NONE)
+    {
+        if (chatAllowed && JOY_NEW(SELECT_BUTTON))
+            sKuro.selectHeld = 1;
+        if (sKuro.selectHeld != 0)
+        {
+            if (JOY_HELD(SELECT_BUTTON))
+            {
+                if (sKuro.selectHeld++ >= SELECT_HOLD_FRAMES)
+                {
+                    sKuro.selectHeld = 0;
+                    KuroChat_OpenBattleKeyboard();
+                    return TRUE;
+                }
+            }
+            else
+            {
+                sKuro.selectHeld = 0;
+                OverlayOpen(OVERLAY_QUICK);
+                DrawQuickOverlay();
+                return TRUE;
+            }
+        }
+        if (sKuro.isClient && sKuro.phase == KURO_UI_ACTION && JOY_NEW(START_BUTTON))
+        {
+            OverlayOpen(OVERLAY_MENU);
+            DrawMenuOverlay();
+            gMain.newKeys = gMain.newAndRepeatedKeys = gMain.heldKeys = 0;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    switch (sKuro.overlay)
+    {
+    case OVERLAY_QUICK:
+        RunQuickOverlay();
+        break;
+    case OVERLAY_MENU:
+        RunMenuOverlay();
+        break;
+    default:
+        RunLogOverlay();
+        break;
+    }
+    // The action menu's controller shares these keys and must not see them while an overlay is up.
+    gMain.newKeys = gMain.newAndRepeatedKeys = gMain.heldKeys = 0;
+    return TRUE;
+}
+
 static void RunIdle(void)
 {
     if (!FlushPendingTx())
+        return;
+
+    if (RunBattleOverlay())
         return;
 
     if (IsMenuOpen())
@@ -1444,6 +1749,7 @@ void KuroPlayback_Main(void)
             sKuro.state = KURO_STATE_RUN;
         break;
     case KURO_STATE_RUN:
+        UpdateBattleBubble();
         if (sKuro.actionIndex >= sKuro.actionCount)
         {
             if (sKuro.needsAck)
@@ -1541,6 +1847,7 @@ static void StartBattlePlayback(u32 mode)
 
 void KuroPlayback_StartClientBattle(u8 opcode, const u8 *payload, u16 length)
 {
+    KuroChat_OnBattleStart();
     FreeAllWindowBuffers();
     StartBattlePlayback(KURO_BOOT_CLIENT);
     sKuro.hasStash = TRUE;
@@ -1552,6 +1859,7 @@ void KuroPlayback_StartClientBattle(u8 opcode, const u8 *payload, u16 length)
 // A resync that began at the menu: the menu has already read RESYNC_BEGIN and BATTLE_START.
 void KuroPlayback_StartClientResync(const u8 *battleStart, u16 length)
 {
+    KuroChat_OnBattleStart();
     static const u8 sResyncBegin[2] = {0, 0};
 
     KuroPlayback_StartClientBattle(KURO_OP_RESYNC_BEGIN, sResyncBegin, sizeof(sResyncBegin));

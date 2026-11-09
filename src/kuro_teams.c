@@ -1,6 +1,7 @@
 // Team storage: two dedicated flash sectors written alternately, so a power cut loses one save at most.
 #include "global.h"
 #include "constants/characters.h"
+#include "kuro_chat.h"
 #include "kuro_link.h"
 #include "kuro_session.h"
 #include "kuro_teams.h"
@@ -10,7 +11,8 @@
 #include "string_util.h"
 
 #define KURO_SAVE_MAGIC 0x4B55524F
-#define KURO_SAVE_VERSION 2
+#define KURO_SAVE_VERSION 3
+#define KURO_SAVE_VERSION_WORDS 2
 #define KURO_SAVE_VERSION_TEAMS_ONLY 1
 #define KURO_TEAM_CHUNK_SIZE 200
 
@@ -24,6 +26,8 @@ struct KuroSaveData
     u32 checksum;
     struct KuroTeam teams[KURO_TEAM_SLOTS];
     u8 recentWords[KURO_RECENT_WORDS][KURO_RECENT_WORD_SIZE];
+    u8 quickChat[KURO_QUICK_PHRASES][KURO_QUICK_PHRASE_SIZE];
+    u8 chatFlags;
 };
 
 STATIC_ASSERT(sizeof(struct KuroSaveData) <= SECTOR_DATA_SIZE - 8, KuroSaveFitsSector);
@@ -58,6 +62,11 @@ static u32 Checksum(const struct KuroSaveData *data, u32 version)
 
     if (version != KURO_SAVE_VERSION_TEAMS_ONLY)
         sum = ChecksumBytes(sum, (const u8 *)data->recentWords, sizeof(data->recentWords));
+    if (version >= KURO_SAVE_VERSION)
+    {
+        sum = ChecksumBytes(sum, (const u8 *)data->quickChat, sizeof(data->quickChat));
+        sum = ChecksumBytes(sum, &data->chatFlags, 1);
+    }
     return sum;
 }
 
@@ -74,6 +83,8 @@ static void InitEmptyTeams(void)
 
     memset(gKuroTeams, 0, sizeof(gKuroTeams));
     memset(gKuroRecentWords, EOS, sizeof(gKuroRecentWords));
+    KuroChat_InitPhrases();
+    gKuroChatFlags = 0;
     for (i = 0; i < KURO_TEAM_SLOTS; i++)
         KuroTeams_DefaultName(i, gKuroTeams[i].name);
 }
@@ -94,7 +105,7 @@ void KuroTeams_Load(void)
         if (TryReadSpecialSaveSector(sSectors[i], sSectorBuffer) != SAVE_STATUS_OK)
             continue;
         if (data->magic != KURO_SAVE_MAGIC
-         || (data->version != KURO_SAVE_VERSION && data->version != KURO_SAVE_VERSION_TEAMS_ONLY)
+         || (data->version != KURO_SAVE_VERSION && data->version != KURO_SAVE_VERSION_WORDS && data->version != KURO_SAVE_VERSION_TEAMS_ONLY)
          || data->checksum != Checksum(data, data->version))
             continue;
         if (!found || data->generation >= bestGeneration)
@@ -102,10 +113,15 @@ void KuroTeams_Load(void)
             found = TRUE;
             bestGeneration = data->generation;
             memcpy(gKuroTeams, data->teams, sizeof(gKuroTeams));
-            if (data->version == KURO_SAVE_VERSION)
+            if (data->version >= KURO_SAVE_VERSION_WORDS)
                 memcpy(gKuroRecentWords, data->recentWords, sizeof(gKuroRecentWords));
             else
                 memset(gKuroRecentWords, EOS, sizeof(gKuroRecentWords));
+            if (data->version >= KURO_SAVE_VERSION)
+            {
+                memcpy(gKuroQuickChat, data->quickChat, sizeof(gKuroQuickChat));
+                gKuroChatFlags = data->chatFlags;
+            }
             sNextSector = (i + 1) % ARRAY_COUNT(sSectors);
         }
     }
@@ -125,6 +141,8 @@ bool32 KuroTeams_Save(void)
     data->generation = sGeneration + 1;
     memcpy(data->teams, gKuroTeams, sizeof(gKuroTeams));
     memcpy(data->recentWords, gKuroRecentWords, sizeof(gKuroRecentWords));
+    memcpy(data->quickChat, gKuroQuickChat, sizeof(gKuroQuickChat));
+    data->chatFlags = gKuroChatFlags;
     data->checksum = Checksum(data, KURO_SAVE_VERSION);
     status = TryWriteSpecialSaveSector(sSectors[sNextSector], sSectorBuffer);
     if (status != SAVE_STATUS_OK)
