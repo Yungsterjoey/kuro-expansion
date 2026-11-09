@@ -15,6 +15,7 @@
 #include "string_util.h"
 #include "text.h"
 #include "window.h"
+#include "kuro_glyphs.h" // KURO: ASCII the base font lacks
 #include "constants/songs.h"
 #include "constants/speaker_names.h"
 
@@ -1581,6 +1582,13 @@ static u16 RenderText(struct TextPrinter *textPrinter)
             return RENDER_FINISH;
         }
 
+#if KURO_EXTRA_GLYPHS // KURO: ASCII the base font lacks
+        if (!textPrinter->japanese && KuroGlyphs_Decompress(currChar, textPrinter->fontId))
+        {
+            PrintGlyph(textPrinter);
+            return RENDER_PRINT;
+        }
+#endif
         switch (textPrinter->fontId)
         {
         case FONT_SMALL:
@@ -1803,10 +1811,21 @@ static u32 (*GetFontWidthFunc(u8 fontId))(u16, bool32)
     return NULL;
 }
 
+// KURO: consults the extra ASCII glyphs before the base font's width table.
+static s32 KuroAwareGlyphWidth(u32 (*func)(u16, bool32), u16 glyphId, bool32 isJapanese, u8 fontId)
+{
+    s32 width = (KURO_EXTRA_GLYPHS && !isJapanese) ? KuroGlyphs_Width(glyphId, fontId) : -1;
+
+    return width >= 0 ? width : (s32)func(glyphId, isJapanese);
+}
+
 s32 GetGlyphWidth(u16 glyphId, bool32 isJapanese, u8 fontId)
 {
     if (!isJapanese && glyphId == CHAR_ZWS)
         return 0;
+
+    if (KURO_EXTRA_GLYPHS && !isJapanese && KuroGlyphs_Width(glyphId, fontId) >= 0) // KURO: ASCII the base font lacks
+        return KuroGlyphs_Width(glyphId, fontId);
 
     u32 (*func)(u16 fontId, bool32 isJapanese);
 
@@ -1872,7 +1891,7 @@ s32 GetStringWidth(u8 fontId, const u8 *str, s16 letterSpacing)
                 bufferPointer = DynamicPlaceholderTextUtil_GetPlaceholderPtr(*++str);
             while (*bufferPointer != EOS)
             {
-                glyphWidth = func(*bufferPointer++, isJapanese);
+                glyphWidth = KuroAwareGlyphWidth(func, *bufferPointer++, isJapanese, fontId); // KURO: ASCII the base font lacks
                 if (minGlyphWidth > 0)
                 {
                     if (glyphWidth < minGlyphWidth)
@@ -1969,7 +1988,7 @@ s32 GetStringWidth(u8 fontId, const u8 *str, s16 letterSpacing)
         case CHAR_PROMPT_CLEAR:
             break;
         default:
-            glyphWidth = func(*str, isJapanese);
+            glyphWidth = KuroAwareGlyphWidth(func, *str, isJapanese, fontId); // KURO: ASCII the base font lacks
             if (minGlyphWidth > 0)
             {
                 if (glyphWidth < minGlyphWidth)

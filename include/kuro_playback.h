@@ -15,9 +15,11 @@ enum KuroBootMode
     KURO_BOOT_WIRE_PLAYBACK,
     KURO_BOOT_LOOPBACK,
     KURO_BOOT_CLIENT,
+    KURO_BOOT_KEYBOARD_TEST,
 };
 
 #define KURO_FIRST_BATTLE_OPCODE 0x40
+#define KURO_FIRST_SOCIAL_OPCODE 0x80
 
 // gKuroUiScreen values, read by the automated input in tools/regress.
 enum KuroUiPhase

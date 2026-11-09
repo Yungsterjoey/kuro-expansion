@@ -3,7 +3,9 @@
 #include "bg.h"
 #include "constants/characters.h"
 #include "gpu_regs.h"
+#include "kuro_account.h"
 #include "kuro_builder.h"
+#include "kuro_keyboard.h"
 #include "kuro_link.h"
 #include "kuro_playback.h"
 #include "kuro_session.h"
@@ -36,6 +38,8 @@ enum KuroMenuScreen
     SCREEN_BUILDER,
     SCREEN_PREVIEW,
     SCREEN_RESULT,
+    SCREEN_ACCOUNT,
+    SCREEN_KEYBOARD_TEST,
 };
 
 #define WINDOW_MAIN 0
@@ -82,8 +86,13 @@ static EWRAM_DATA u8 sOrder[PARTY_SIZE] = {0};
 static EWRAM_DATA u8 sOrderCount = 0;
 static EWRAM_DATA u8 sIconIds[PARTY_SIZE * 2] = {0};
 static EWRAM_DATA bool8 sIconsUp = FALSE;
+static EWRAM_DATA u8 sKeyboardText[KURO_KEYBOARD_MAX_LENGTH + 1] = {0};
+
+static EWRAM_DATA u32 sLastLoopVblank = 0;
 
 EWRAM_DATA volatile u8 gKuroUiScreen = 0;
+// The most frames one trip round the menu loop took with the keyboard open. Read by tools/regress.
+EWRAM_DATA volatile u8 gKuroKeyboardFrameGap = 0;
 
 static const u8 sText_Title[] = _("KURO");
 static const u8 sText_NoBridge[] = _("Bridge not attached.\nLoad the KURO script in mGBA.");
@@ -95,6 +104,12 @@ static const u8 sText_RelayLabel[] = _("\nRelay: ");
 static const u8 sText_SignedInAs[] = _("Signed in as ");
 static const u8 sText_FindBattle[] = _("Find Battle");
 static const u8 sText_TeamBuilder[] = _("Team Builder");
+static const u8 sText_Account[] = _("Account");
+static const u8 sText_GuestSearch[] = _("Sign in to search for a battle.");
+static const u8 sText_GuestAs[] = _("Playing as guest ");
+static const u8 sText_KeyboardTest[] = _("Keyboard test");
+static const u8 sText_KeyboardSent[] = _("Sent:\n");
+static const u8 *const sMainRows[] = {sText_FindBattle, sText_TeamBuilder, sText_Account};
 static const u8 sText_ChooseTeam[] = _("Choose a team");
 static const u8 sText_NoTeams[] = _("No teams yet. Build one first.");
 static const u8 sText_PressAToContinue[] = _("Press A to continue.");
@@ -141,6 +156,14 @@ static void DrawScreen(void)
     u8 buffer[100];
     u32 i, y;
 
+    // The keyboard draws only what changed, so the window must not be cleared under it.
+    if (KuroKeyboard_IsOpen())
+    {
+        KuroKeyboard_Draw(WINDOW_MAIN);
+        CopyWindowToVram(WINDOW_MAIN, COPYWIN_FULL);
+        return;
+    }
+
     FillWindowPixelBuffer(WINDOW_MAIN, PIXEL_FILL(1));
     switch (sScreen)
     {
@@ -164,15 +187,25 @@ static void DrawScreen(void)
         PrintLine(buffer, LINE_HEIGHT * 4);
         break;
     case SCREEN_MAIN:
-        StringCopy(buffer, sText_SignedInAs);
+        StringCopy(buffer, gKuroSession.status == KURO_RELAY_GUEST ? sText_GuestAs : sText_SignedInAs);
         StringAppend(buffer, gKuroSession.username);
         PrintLine(buffer, 0);
-        StringCopy(buffer, sCursor == 0 ? sText_Cursor : sText_Indent);
-        StringAppend(buffer, sText_FindBattle);
-        PrintLine(buffer, LINE_HEIGHT * 2);
-        StringCopy(buffer, sCursor == 1 ? sText_Cursor : sText_Indent);
-        StringAppend(buffer, sText_TeamBuilder);
-        PrintLine(buffer, LINE_HEIGHT * 3);
+        for (i = 0; i < ARRAY_COUNT(sMainRows); i++)
+        {
+            StringCopy(buffer, sCursor == i ? sText_Cursor : sText_Indent);
+            StringAppend(buffer, sMainRows[i]);
+            PrintLine(buffer, LINE_HEIGHT * (i + 2));
+        }
+        if (sShownPopup[0] != EOS)
+            PrintLine(sShownPopup, LINE_HEIGHT * 6);
+        break;
+    case SCREEN_ACCOUNT:
+        KuroAccount_Draw(WINDOW_MAIN);
+        CopyWindowToVram(WINDOW_MAIN, COPYWIN_FULL);
+        return;
+    case SCREEN_KEYBOARD_TEST:
+        PrintLine(sText_KeyboardSent, 0);
+        PrintLine(sKeyboardText, LINE_HEIGHT);
         break;
     case SCREEN_TEAM_PICK:
         if (sShownPopup[0] != EOS)
@@ -285,6 +318,12 @@ static void SetScreen(u8 screen)
     sDirty = TRUE;
 }
 
+static void OpenAccount(enum KuroAccountEntry entry)
+{
+    KuroAccount_Open(entry);
+    SetScreen(SCREEN_ACCOUNT);
+}
+
 static void UpdateConnection(void)
 {
     if (gKuroSession.mismatch)
@@ -295,9 +334,20 @@ static void UpdateConnection(void)
     }
     if (sScreen == SCREEN_CONNECTING && gKuroSession.handshakeDone
      && (gKuroSession.status == KURO_RELAY_GUEST || gKuroSession.status == KURO_RELAY_LOGGED_IN))
+    {
         SetScreen(SCREEN_MAIN);
-    else if (sScreen != SCREEN_CONNECTING && !(gKuroLink.bridgeFlags & 2))
+    }
+    else if ((sScreen == SCREEN_CONNECTING || sScreen == SCREEN_MAIN || sScreen == SCREEN_FORMATS)
+          && gKuroSession.handshakeDone && gKuroSession.status == KURO_RELAY_LOGGED_OUT)
+    {
+        OpenAccount(KURO_ACCOUNT_SIGN_IN);
+    }
+    else if (sScreen != SCREEN_CONNECTING && sScreen != SCREEN_KEYBOARD_TEST && !(gKuroLink.bridgeFlags & 2))
+    {
+        if (sScreen == SCREEN_ACCOUNT)
+            KuroAccount_Abort();
         SetScreen(SCREEN_CONNECTING);
+    }
 }
 
 static bool32 HandlePreviewFrame(u8 opcode, u16 length);
@@ -316,7 +366,7 @@ static bool32 PumpLink(void)
             return TRUE;
         if (KuroLink_ReadFrame(&opcode, sPayload, &length) != KURO_LINK_READ_OK)
             break;
-        if (opcode >= KURO_FIRST_BATTLE_OPCODE)
+        if (!KuroSession_IsSessionOpcode(opcode))
         {
             if (HandlePreviewFrame(opcode, length))
                 continue;
@@ -457,7 +507,7 @@ static bool32 TryStartPendingBattle(void)
     // A replay that moves on to battle events has passed team preview already.
     if (sFoeCount > 0 && !sPreviewAnswered && !(sResyncAtMenu && next >= 0x50 && next != OP_RESYNC_END))
         return FALSE;
-    if (next < KURO_FIRST_BATTLE_OPCODE || next == KURO_FRAME_TEAM_PREVIEW || next == OP_RESYNC_BEGIN || next == OP_BATTLE_START)
+    if (next < 0 || KuroSession_IsSessionOpcode(next) || next == KURO_FRAME_TEAM_PREVIEW || next == OP_RESYNC_BEGIN || next == OP_BATTLE_START)
         return FALSE;
     StartPendingBattle();
     return TRUE;
@@ -622,23 +672,57 @@ static void HandleInput(void)
     case SCREEN_MAIN:
         if (JOY_NEW(DPAD_UP) || JOY_NEW(DPAD_DOWN))
         {
-            sCursor = !sCursor;
+            sCursor = (sCursor + (JOY_NEW(DPAD_DOWN) ? 1 : ARRAY_COUNT(sMainRows) - 1)) % ARRAY_COUNT(sMainRows);
             sDirty = TRUE;
         }
         else if (JOY_NEW(A_BUTTON))
         {
             PlaySE(SE_SELECT);
+            sShownPopup[0] = EOS;
             if (sCursor == 0)
             {
-                SetScreen(SCREEN_FORMATS);
+                // Poka-yoke: a guest gets the reason here instead of a refusal from the relay.
+                if (gKuroSession.status == KURO_RELAY_GUEST)
+                {
+                    StringCopy(sShownPopup, sText_GuestSearch);
+                    sDirty = TRUE;
+                }
+                else
+                {
+                    SetScreen(SCREEN_FORMATS);
+                }
             }
-            else
+            else if (sCursor == 1)
             {
                 KuroBuilder_Open();
                 SetScreen(SCREEN_BUILDER);
             }
+            else
+            {
+                OpenAccount(KURO_ACCOUNT_MENU);
+            }
         }
         break;
+    case SCREEN_ACCOUNT:
+    {
+        bool32 dirty = FALSE;
+
+        if (KuroAccount_Update(&dirty) == KURO_ACCOUNT_DONE)
+            SetScreen(SCREEN_MAIN);
+        else if (dirty)
+            sDirty = TRUE;
+        break;
+    }
+    case SCREEN_KEYBOARD_TEST:
+    {
+        bool32 dirty = FALSE;
+
+        if (KuroKeyboard_IsOpen() && KuroKeyboard_Update(&dirty) != KURO_KEYBOARD_NONE)
+            dirty = TRUE;
+        if (dirty)
+            sDirty = TRUE;
+        break;
+    }
     case SCREEN_BUILDER:
         if (KuroBuilder_HandleInput())
             SetScreen(SCREEN_MAIN);
@@ -698,6 +782,10 @@ static void HandleInput(void)
 
 static void CB2_KuroMenu(void)
 {
+    if (KuroKeyboard_IsOpen() && gMain.vblankCounter1 - sLastLoopVblank > gKuroKeyboardFrameGap)
+        gKuroKeyboardFrameGap = gMain.vblankCounter1 - sLastLoopVblank;
+    sLastLoopVblank = gMain.vblankCounter1;
+    KuroLink_ScrubSecureTx();
     if (PumpLink())
         return;
 
@@ -706,6 +794,8 @@ static void CB2_KuroMenu(void)
         gKuroSession.popupPending = FALSE;
         StringCopy(sShownPopup, gKuroSession.popup);
         KuroBuilder_ShowPopup(sShownPopup);
+        if (sScreen == SCREEN_ACCOUNT)
+            KuroAccount_ShowPopup(sShownPopup);
         sDirty = TRUE;
     }
     if (gKuroSession.status != sLastStatus || gKuroSession.formatCount != sLastFormatCount
@@ -786,6 +876,14 @@ void CB2_KuroMenuStart(void)
         gKuroSession.resultPending = FALSE;
         sScreen = SCREEN_RESULT;
     }
+    else if (gKuroBootMode == KURO_BOOT_KEYBOARD_TEST)
+    {
+        struct KuroKeyboardOptions options = {.title = sText_KeyboardTest, .text = sKeyboardText, .limit = KURO_KEYBOARD_MAX_LENGTH, .predictive = TRUE, .learn = TRUE};
+
+        sKeyboardText[0] = EOS;
+        KuroKeyboard_Open(&options);
+        sScreen = SCREEN_KEYBOARD_TEST;
+    }
     else if (KuroBuilder_IsOpen())
         sScreen = SCREEN_BUILDER;
     else
@@ -793,5 +891,6 @@ void CB2_KuroMenuStart(void)
     sCursor = 0;
     sDirty = TRUE;
     sShownPopup[0] = EOS;
+    sLastLoopVblank = gMain.vblankCounter1;
     SetMainCallback2(CB2_KuroMenu);
 }

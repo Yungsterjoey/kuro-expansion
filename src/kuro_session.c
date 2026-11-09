@@ -2,13 +2,15 @@
 #include "constants/characters.h"
 #include "kuro_build_info.h"
 #include "kuro_link.h"
+#include "kuro_playback.h"
 #include "kuro_session.h"
 #include "kuro_teams.h"
 #include "string_util.h"
 
-#define KURO_PROTOCOL_MINOR 0
+#define KURO_PROTOCOL_MINOR 1
 #define KURO_FEATURE_TERA (1 << 1)
 #define KURO_FEATURE_TEAM_IMPORT (1 << 5)
+#define KURO_FEATURE_ACCOUNTS (1 << 6)
 #define CAPABILITY_FIXED_SIZE 18
 
 EWRAM_DATA struct KuroSession gKuroSession = {0};
@@ -29,7 +31,7 @@ void KuroSession_Reset(void)
 static u16 BuildCapabilityBlock(u8 *out)
 {
     u32 crc = KURO_IDMAP_CRC;
-    u32 features = KURO_FEATURE_TERA | KURO_FEATURE_TEAM_IMPORT;
+    u32 features = KURO_FEATURE_TERA | KURO_FEATURE_TEAM_IMPORT | KURO_FEATURE_ACCOUNTS;
     u16 i, length = 0;
 
     out[length++] = KURO_PROTOCOL_MAJOR;
@@ -100,6 +102,59 @@ static void HandleFormatList(const u8 *payload, u16 length)
     }
 }
 
+static void HandleAccountList(const u8 *payload, u16 length)
+{
+    u16 offset = 2, consumed;
+    u32 count = 0;
+
+    if (length < 2)
+        return;
+    gKuroSession.accountStoreAvailable = (payload[0] & KURO_ACCOUNT_FLAG_STORE) != 0;
+    while (count < payload[1] && count < KURO_MAX_ACCOUNTS && offset < length)
+    {
+        CopyText(gKuroSession.accountNames[count++], KURO_USERNAME_SIZE, &payload[offset], length - offset, &consumed);
+        offset += consumed;
+    }
+    gKuroSession.accountCount = count;
+    gKuroSession.accountListReady = TRUE;
+}
+
+static void HandleRatings(const u8 *payload, u16 length)
+{
+    u32 i, count;
+
+    if (length < 1)
+        return;
+    count = min(payload[0], KURO_MAX_FORMATS);
+    count = min(count, (u32)(length - 1) / 3);
+    for (i = 0; i < count; i++)
+    {
+        gKuroSession.ratings[i].formatIndex = payload[1 + i * 3];
+        gKuroSession.ratings[i].elo = payload[2 + i * 3] | (payload[3 + i * 3] << 8);
+    }
+    gKuroSession.ratingCount = count;
+}
+
+static void HandleAvatarList(const u8 *payload, u16 length)
+{
+    u32 i, count;
+
+    if (length < 3)
+        return;
+    gKuroSession.currentAvatar = payload[0] | (payload[1] << 8);
+    count = min(payload[2], KURO_MAX_AVATARS);
+    count = min(count, (u32)(length - 3) / 2);
+    for (i = 0; i < count; i++)
+        gKuroSession.avatars[i] = payload[3 + i * 2] | (payload[4 + i * 2] << 8);
+    gKuroSession.avatarCount = count;
+    gKuroSession.avatarListReady = TRUE;
+}
+
+bool32 KuroSession_IsSessionOpcode(u32 opcode)
+{
+    return opcode < KURO_FIRST_BATTLE_OPCODE || opcode >= KURO_FIRST_SOCIAL_OPCODE;
+}
+
 void KuroSession_HandleFrame(u8 opcode, const u8 *payload, u16 length)
 {
     u16 consumed;
@@ -138,6 +193,23 @@ void KuroSession_HandleFrame(u8 opcode, const u8 *payload, u16 length)
             CopyText(gKuroSession.exportText, sizeof(gKuroSession.exportText), &payload[1], length - 1, &consumed);
             gKuroSession.exportDone = TRUE;
         }
+        break;
+    case KURO_OP_ACCOUNT_LIST:
+        HandleAccountList(payload, length);
+        break;
+    case KURO_OP_LOGIN_RESULT:
+        if (length >= 1)
+        {
+            gKuroSession.loginCode = payload[0];
+            CopyText(gKuroSession.loginText, sizeof(gKuroSession.loginText), &payload[1], length - 1, &consumed);
+            gKuroSession.loginResultPending = TRUE;
+        }
+        break;
+    case KURO_OP_RATINGS:
+        HandleRatings(payload, length);
+        break;
+    case KURO_OP_AVATAR_LIST:
+        HandleAvatarList(payload, length);
         break;
     default:
         break;

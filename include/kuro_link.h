@@ -8,6 +8,8 @@
 #define KURO_MAX_PAYLOAD 255
 #define KURO_PROTOCOL_MAJOR 2
 
+#define KURO_BRIDGE_FLAG_RELAY (1 << 1)
+
 #define KURO_ROM_FLAG_BOOTED (1 << 0)
 #define KURO_ROM_FLAG_IN_BATTLE (1 << 1)
 #define KURO_ROM_FLAG_AWAITING_CHOICE (1 << 2)
@@ -46,5 +48,8 @@ enum KuroLinkRead KuroLink_ReadFrame(u8 *opcode, u8 *payload, u16 *length);
 s32 KuroLink_PeekOpcode(void);
 // Returns FALSE when the TX ring is full; the caller retries next frame and must not drop it.
 bool32 KuroLink_SendFrame(u8 opcode, const u8 *payload, u16 length);
+// Secure keystrokes must not stay in the TX ring: mark the send, and the scrub zeroes the ring's free bytes.
+void KuroLink_MarkSecureTx(void);
+void KuroLink_ScrubSecureTx(void);
 
 #endif // GUARD_KURO_LINK_H

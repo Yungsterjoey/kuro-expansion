@@ -10,7 +10,8 @@
 #include "string_util.h"
 
 #define KURO_SAVE_MAGIC 0x4B55524F
-#define KURO_SAVE_VERSION 1
+#define KURO_SAVE_VERSION 2
+#define KURO_SAVE_VERSION_TEAMS_ONLY 1
 #define KURO_TEAM_CHUNK_SIZE 200
 
 STATIC_ASSERT(sizeof(struct KuroTeamMon) == KURO_MON_WIRE_SIZE, KuroTeamMonIsWireSize);
@@ -22,6 +23,7 @@ struct KuroSaveData
     u32 generation;
     u32 checksum;
     struct KuroTeam teams[KURO_TEAM_SLOTS];
+    u8 recentWords[KURO_RECENT_WORDS][KURO_RECENT_WORD_SIZE];
 };
 
 STATIC_ASSERT(sizeof(struct KuroSaveData) <= SECTOR_DATA_SIZE - 8, KuroSaveFitsSector);
@@ -34,19 +36,28 @@ static const u8 sTagDoubles[] = _("Gen 9 Doubles OU");
 static const u8 *const sFormatTags[KURO_FORMAT_TAG_COUNT] = {sTagAny, sTagOu, sTagDoubles};
 
 EWRAM_DATA struct KuroTeam gKuroTeams[KURO_TEAM_SLOTS] = {0};
+EWRAM_DATA u8 gKuroRecentWords[KURO_RECENT_WORDS][KURO_RECENT_WORD_SIZE] = {0};
 static EWRAM_DATA u32 sGeneration = 0;
 static EWRAM_DATA u8 sNextSector = 0;
 static EWRAM_DATA u8 sSectorBuffer[SECTOR_DATA_SIZE] = {0};
 static EWRAM_DATA u8 sPushBuffer[1 + KURO_TEAM_SIZE * KURO_MON_WIRE_SIZE] = {0};
 static EWRAM_DATA u16 sPushLength = 0;
 
-static u32 Checksum(const struct KuroSaveData *data)
+static u32 ChecksumBytes(u32 sum, const u8 *bytes, u32 size)
 {
-    const u8 *bytes = (const u8 *)data->teams;
-    u32 i, sum = data->generation ^ KURO_SAVE_VERSION;
+    u32 i;
 
-    for (i = 0; i < sizeof(data->teams); i++)
+    for (i = 0; i < size; i++)
         sum = (sum * 31) + bytes[i];
+    return sum;
+}
+
+static u32 Checksum(const struct KuroSaveData *data, u32 version)
+{
+    u32 sum = ChecksumBytes(data->generation ^ version, (const u8 *)data->teams, sizeof(data->teams));
+
+    if (version != KURO_SAVE_VERSION_TEAMS_ONLY)
+        sum = ChecksumBytes(sum, (const u8 *)data->recentWords, sizeof(data->recentWords));
     return sum;
 }
 
@@ -62,6 +73,7 @@ static void InitEmptyTeams(void)
     u32 i;
 
     memset(gKuroTeams, 0, sizeof(gKuroTeams));
+    memset(gKuroRecentWords, EOS, sizeof(gKuroRecentWords));
     for (i = 0; i < KURO_TEAM_SLOTS; i++)
         KuroTeams_DefaultName(i, gKuroTeams[i].name);
 }
@@ -81,13 +93,19 @@ void KuroTeams_Load(void)
     {
         if (TryReadSpecialSaveSector(sSectors[i], sSectorBuffer) != SAVE_STATUS_OK)
             continue;
-        if (data->magic != KURO_SAVE_MAGIC || data->version != KURO_SAVE_VERSION || data->checksum != Checksum(data))
+        if (data->magic != KURO_SAVE_MAGIC
+         || (data->version != KURO_SAVE_VERSION && data->version != KURO_SAVE_VERSION_TEAMS_ONLY)
+         || data->checksum != Checksum(data, data->version))
             continue;
         if (!found || data->generation >= bestGeneration)
         {
             found = TRUE;
             bestGeneration = data->generation;
             memcpy(gKuroTeams, data->teams, sizeof(gKuroTeams));
+            if (data->version == KURO_SAVE_VERSION)
+                memcpy(gKuroRecentWords, data->recentWords, sizeof(gKuroRecentWords));
+            else
+                memset(gKuroRecentWords, EOS, sizeof(gKuroRecentWords));
             sNextSector = (i + 1) % ARRAY_COUNT(sSectors);
         }
     }
@@ -106,7 +124,8 @@ bool32 KuroTeams_Save(void)
     data->version = KURO_SAVE_VERSION;
     data->generation = sGeneration + 1;
     memcpy(data->teams, gKuroTeams, sizeof(gKuroTeams));
-    data->checksum = Checksum(data);
+    memcpy(data->recentWords, gKuroRecentWords, sizeof(gKuroRecentWords));
+    data->checksum = Checksum(data, KURO_SAVE_VERSION);
     status = TryWriteSpecialSaveSector(sSectors[sNextSector], sSectorBuffer);
     if (status != SAVE_STATUS_OK)
         return FALSE;

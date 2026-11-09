@@ -1134,3 +1134,19 @@ EMOJI_BIGANGER = F9 FE
 '\l' = FA @ scroll up window text
 '\p' = FB @ new paragraph
 '\n' = FE @ new line
+
+@ KURO: printable ASCII the base font lacks. Drawn by src/kuro_glyphs.c; order matches include/kuro_glyphs.h.
+KURO_QUOTE      = 3B
+KURO_HASH       = 3C
+KURO_DOLLAR     = 3D
+KURO_ASTERISK   = 3E
+KURO_AT         = 3F
+KURO_LBRACKET   = 40
+KURO_BACKSLASH  = 41
+KURO_RBRACKET   = 42
+KURO_CARET      = 43
+KURO_UNDERSCORE = 44
+KURO_BACKTICK   = 45
+KURO_LBRACE     = 46
+KURO_PIPE       = 47
+KURO_RBRACE     = 48

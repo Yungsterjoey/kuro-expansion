@@ -730,7 +730,7 @@ static bool32 FetchNextEvent(void)
     if (!(sKuro.isWire ? ReadWireFrame(&opcode, &length) : ReadFixtureFrame(&opcode, &length)))
         return FALSE;
 
-    if (opcode < KURO_FIRST_BATTLE_OPCODE)
+    if (KuroSession_IsSessionOpcode(opcode))
     {
         KuroSession_HandleFrame(opcode, payload, length);
         return FALSE;
@@ -1568,7 +1568,7 @@ void CB2_KuroBoot(void)
     KuroSession_Reset();
     if (mode == KURO_BOOT_LOOPBACK)
         SetMainCallback2(CB2_KuroLoopback);
-    else if (mode == KURO_BOOT_CLIENT)
+    else if (mode == KURO_BOOT_CLIENT || mode == KURO_BOOT_KEYBOARD_TEST)
         SetMainCallback2(CB2_KuroMenuStart);
     else
         StartBattlePlayback(mode <= KURO_BOOT_WIRE_PLAYBACK ? mode : KURO_BOOT_FIXTURE_0);

@@ -16,7 +16,7 @@
 #include "main.h"
 #include "malloc.h"
 #include "move.h"
-#include "naming_screen.h"
+#include "kuro_keyboard.h"
 #include "pokemon.h"
 #include "sound.h"
 #include "string_util.h"
@@ -46,6 +46,7 @@ enum BuilderScreen
     BS_STATS,
     BS_CONFIRM_DELETE,
     BS_MESSAGE,
+    BS_NAMING,
     BS_WAIT_EXPORT,
     BS_WAIT_IMPORT,
 };
@@ -90,6 +91,8 @@ static const u8 sText_Failed[] = _("Rejected");
 static const u8 sText_Space[] = _("  ");
 static const u8 sText_Slash[] = _("/");
 static const u8 sText_ConfirmDelete[] = _("Delete this team?\nA: delete  B: keep");
+static const u8 sText_TeamName[] = _("Team name");
+static const u8 sText_Nickname[] = _("Nickname");
 static const u8 sText_NoEmptySlot[] = _("No empty slot to copy into.");
 static const u8 sText_EmptyTeam[] = _("This team is empty.");
 static const u8 sText_Saved[] = _("Team received and saved.");
@@ -505,7 +508,7 @@ static void SaveTeams(void)
         ShowMessage(sText_SaveFailed, BS_TEAMS);
 }
 
-static void CB2_ReturnFromNaming(void)
+static void ApplyNaming(void)
 {
     u32 size;
 
@@ -517,7 +520,6 @@ static void CB2_ReturnFromNaming(void)
             memcpy(CurrentTeam()->name, sNameBuffer, size);
             CurrentTeam()->name[size] = EOS;
         }
-        sCursor = TM_RENAME;
     }
     else
     {
@@ -526,26 +528,36 @@ static void CB2_ReturnFromNaming(void)
         memset(mon->nickname, EOS, KURO_MON_NICK_SIZE);
         size = min(StringLength(sNameBuffer), KURO_MON_NICK_SIZE - 1);
         memcpy(mon->nickname, sNameBuffer, size);
-        sCursor = MR_NICKNAME;
     }
     SaveTeams();
-    SetMainCallback2(CB2_KuroMenuStart);
+}
+
+static void LeaveNaming(void)
+{
+    GoTo(sNamingTeam ? BS_TEAM_MENU : BS_MON);
+    sCursor = sNamingTeam ? TM_RENAME : MR_NICKNAME;
 }
 
 static void OpenNaming(bool32 team)
 {
+    struct KuroKeyboardOptions options = {.text = sNameBuffer};
+
     sNamingTeam = team;
     if (team)
     {
         StringCopy(sNameBuffer, CurrentTeam()->name);
-        DoNamingScreen(NAMING_SCREEN_BOX, sNameBuffer, 0, 0, 0, CB2_ReturnFromNaming);
+        options.title = sText_TeamName;
+        options.limit = KURO_TEAM_NAME_SIZE - 1;
     }
     else
     {
         memcpy(sNameBuffer, CurrentMon()->nickname, KURO_MON_NICK_SIZE);
         sNameBuffer[KURO_MON_NICK_SIZE] = EOS;
-        DoNamingScreen(NAMING_SCREEN_NICKNAME, sNameBuffer, CurrentMon()->species, 0, 0, CB2_ReturnFromNaming);
+        options.title = sText_Nickname;
+        options.limit = KURO_MON_NICK_SIZE - 1;
     }
+    KuroKeyboard_Open(&options);
+    GoTo(BS_NAMING);
 }
 
 static void RemoveMon(void)
@@ -766,6 +778,20 @@ bool32 KuroBuilder_HandleInput(void)
 {
     struct KuroTeam *team = CurrentTeam();
     bool32 accept = JOY_NEW(A_BUTTON), cancel = JOY_NEW(B_BUTTON);
+
+    if (sBuilder == BS_NAMING)
+    {
+        bool32 dirty = FALSE;
+        enum KuroKeyboardResult result = KuroKeyboard_Update(&dirty);
+
+        if (result == KURO_KEYBOARD_SENT)
+            ApplyNaming();
+        if (result != KURO_KEYBOARD_NONE)
+            LeaveNaming();
+        else if (dirty)
+            sDirty = TRUE;
+        return FALSE;
+    }
 
     if (accept || cancel)
         PlaySE(SE_SELECT);

@@ -9,6 +9,8 @@ STATIC_ASSERT(sizeof(struct KuroLink) == 0x1000, KuroLinkIsExactly4KB);
 
 volatile struct KuroLink gKuroLink __attribute__((section(".kurolink"), aligned(0x1000)));
 
+static EWRAM_DATA bool8 sScrubTx = FALSE;
+
 static const u8 sMagic[8] = {'K', 'U', 'R', 'O', 'L', 'N', 'K', '1'};
 
 static u16 RingUsed(u16 head, u16 tail, u16 size)
@@ -28,6 +30,7 @@ void KuroLink_Init(void)
 
     for (i = 0; i < sizeof(struct KuroLink); i++)
         bytes[i] = 0;
+    sScrubTx = FALSE;
 
     gKuroLink.protocolVersion = KURO_PROTOCOL_MAJOR;
     gKuroLink.romFlags = KURO_ROM_FLAG_BOOTED;
@@ -35,6 +38,7 @@ void KuroLink_Init(void)
     // The magic goes in last, so the bridge never attaches to a half-written header.
     for (i = 0; i < ARRAY_COUNT(sMagic); i++)
         gKuroLink.magic[i] = sMagic[i];
+
 }
 
 void KuroLink_Tick(void)
@@ -137,4 +141,36 @@ bool32 KuroLink_SendFrame(u8 opcode, const u8 *payload, u16 length)
     // Head advances last, so the bridge never reads a half-written frame.
     gKuroLink.txHead = position;
     return TRUE;
+}
+
+void KuroLink_MarkSecureTx(void)
+{
+    sScrubTx = TRUE;
+}
+
+// Runs from the menu's main loop, never an interrupt, so a frame is not being written meanwhile.
+void KuroLink_ScrubSecureTx(void)
+{
+    u16 head = gKuroLink.txHead;
+    u16 tail = gKuroLink.txTail;
+    u16 position = head;
+
+    if (!sScrubTx)
+        return;
+    if (!(gKuroLink.bridgeFlags & KURO_BRIDGE_FLAG_RELAY))
+    {
+        // Nothing will drain the ring, and the bridge empties it when it next connects.
+        for (position = 0; position < KURO_TX_RING_SIZE; position++)
+            gKuroLink.tx[position] = 0;
+        sScrubTx = FALSE;
+        return;
+    }
+    do
+    {
+        gKuroLink.tx[position] = 0;
+        position = (position + 1) % KURO_TX_RING_SIZE;
+    }
+    while (position != tail);
+    if (head == tail)
+        sScrubTx = FALSE;
 }

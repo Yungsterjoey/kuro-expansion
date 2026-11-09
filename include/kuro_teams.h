@@ -43,8 +43,11 @@ struct KuroTeam
 };
 
 #define KURO_FORMAT_TAG_COUNT 3
+#define KURO_RECENT_WORDS 16
+#define KURO_RECENT_WORD_SIZE 12
 
 extern struct KuroTeam gKuroTeams[KURO_TEAM_SLOTS];
+extern u8 gKuroRecentWords[KURO_RECENT_WORDS][KURO_RECENT_WORD_SIZE];
 
 void KuroTeams_Load(void);
 bool32 KuroTeams_Save(void);
