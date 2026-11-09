@@ -6,7 +6,7 @@
 #include "kuro_teams.h"
 #include "string_util.h"
 
-#define KURO_PROTOCOL_MINOR 2
+#define KURO_PROTOCOL_MINOR 0
 #define KURO_FEATURE_TERA (1 << 1)
 #define KURO_FEATURE_TEAM_IMPORT (1 << 5)
 #define CAPABILITY_FIXED_SIZE 18
